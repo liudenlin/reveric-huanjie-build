@@ -1,0 +1,35 @@
+{
+  "id": "reveric.deepseek",
+  "name": {
+    "en": "DeepSeek Search / Fetch",
+    "zh-CN": "DeepSeek 搜索 / 读取"
+  },
+  "description": {
+    "en": "DeepSeek web search and page retrieval.",
+    "zh-CN": "DeepSeek 网页搜索与页面读取。"
+  },
+  "version": "1.0.0",
+  "author": "Reveric",
+  "pluginApiVersion": "^1",
+  "main": "dist/index.js",
+  "settings": {
+    "fields": {
+      "apiKey": {
+        "type": "secret",
+        "title": "API Key",
+        "required": true
+      }
+    },
+    "actions": {
+      "verifyApiKey": {
+        "title": {
+          "en": "Verify API Key",
+          "zh-CN": "验证 API Key"
+        },
+        "requires": [
+          "apiKey"
+        ]
+      }
+    }
+  }
+}

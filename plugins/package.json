@@ -1,0 +1,27 @@
+{
+  "name": "reveric-plugins",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "sdk"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node build.mjs --test",
+    "format": "prettier --write \"**/*.{js,mjs,ts,tsx}\""
+  },
+  "dependencies": {
+    "node-html-markdown": "2.0.0",
+    "node-html-parser": "6.1.13",
+    "url-toolkit": "2.2.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.7",
+    "esbuild": "0.25.12",
+    "prettier": "3.9.10",
+    "typescript": "5.9.3"
+  }
+}

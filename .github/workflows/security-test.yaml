@@ -1,0 +1,177 @@
+# 职责: P0-A.2 最小 Windows CI — 在 GitHub 托管的 windows-latest 上运行正式
+#       项目内测试，作为「正式测试通过」的验收依据。
+#       本机缺失 MSVC Build Tools / Windows SDK（无 cl.exe、link.exe、kernel32.lib），
+#       无法在本地运行 native hooks（super_native_extensions / flutter_scene / sqlite3）
+#       相关的 flutter test。windows-latest runner 自带完整 MSVC 工具链，可编译。
+# 关联:
+#   .github/workflows/build.yaml  （打包流程，同源 Flutter/rust 版本约定）
+#   .fvmrc                         （Flutter 版本 pin）
+# 触发:
+#   push 到 unstable（含本次 P0-A.2 提交）+ 手动 workflow_dispatch。
+# 注意:
+#   本 workflow 需 push 到 GitHub（looplj/reveric）后才会运行 —— 属于需要用户
+#   授权的操作（见 P0-A.2 验收报告 §任务三）。创建本文件不改变本地行为。
+name: Security Test
+
+on:
+  push:
+    branches: ['unstable']
+  pull_request:
+    branches: ['unstable']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 与 build.yaml 保持同源：Flutter 版本 pin 自 .fvmrc，rust 工具链与打包一致。
+env:
+  FLUTTER_VERSION: '0b771a584214b44aa1f94f9707f2756207356f41'
+  FLUTTER_CHANNEL: 'master'
+  RUST_TOOLCHAIN: '1.99.1'
+
+jobs:
+  # Job 1 — 远程安全链路正式测试（P0-A/P0-B 验收核心）。
+  # 只跑纯逻辑测试（授权服务 / bridge / coordinator / tool dispatcher / 门禁 /
+  # 数据库迁移与审计），不依赖 widget binding —— 不受 Windows native windowing
+  # 上游限制影响，跑通即满足「正式测试通过」。
+  # P0-B.1 T1：widget 测试（依赖 binding 的 settings_card）已拆至 Job 2，
+  # 使本 Job 不再被 InternalFlutterWindows_WindowManager_Initialize 加载失败污染。
+  remote-security-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Enable Git long paths for Flutter SDK checkout
+        shell: pwsh
+        run: git config --system core.longpaths true
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        shell: bash
+        run: flutter pub get --enforce-lockfile
+      # 远程安全链路（纯逻辑，无 widget binding）。
+      # --reporter expanded：每个用例逐条输出，失败时提供可追溯日志。
+      # --test-randomize-ordering-seed random：隔离顺序影响，暴露隐式共享态。
+      # --exclude-tags：双保险——绝不执行需真实小说 DB / 真实账号 / 真实 LLM 的
+      # 集成测试（dart_test.yaml 定义的 e2e_evaluation / debug_provider_e2e /
+      # tool_dump）。CI 只跑内存 DB 单测，不触碰用户真实数据。
+      - name: Run remote security tests
+        shell: bash
+        run: |
+          flutter test \
+            --reporter expanded \
+            --test-randomize-ordering-seed random \
+            --exclude-tags e2e_evaluation \
+            --exclude-tags debug_provider_e2e \
+            --exclude-tags tool_dump \
+            test/shared/services/remote/ \
+            test/shared/services/ai/assistant/ \
+            test/shared/models/remote_bridge_settings_data_test.dart \
+            test/shared/database/remote_authorization_store_migration_test.dart \
+            test/shared/database/remote_authorization_audit_store_test.dart \
+            test/shared/database/remote_authorization_schema_regression_test.dart
+      - name: Upload test report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-test-report
+          path: |
+            **/build/reports/**/*.html
+            **/test-results/**
+          if-no-files-found: ignore
+
+  # Job 2 — P0-B 授权管理 UI（widget）测试，独立追踪。
+  # 依赖 widget binding，独立于 Job 1（纯逻辑）运行，失败不阻塞 Job 1 验收。
+  # P0-B.3 任务4：修复 shared_preferences MissingPluginException（测试内
+  # SharedPreferences.setMockInitialValues 建立内存 mock）后，本 Job 可真实
+  # 运行并产出**真实通过/失败结论**（移除 continue-on-error，失败即真实失败，
+  # 不得把 continue-on-error 当作通过）。如仍有框架级环境限制（native
+  # windowing），如实上报，不得删除测试或掩盖。
+  widget-security-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Enable Git long paths for Flutter SDK checkout
+        shell: pwsh
+        run: git config --system core.longpaths true
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        shell: bash
+        run: flutter pub get --enforce-lockfile
+      - name: Run widget security tests
+        shell: bash
+        run: |
+          flutter test \
+            --reporter expanded \
+            --test-randomize-ordering-seed random \
+            --exclude-tags e2e_evaluation \
+            --exclude-tags debug_provider_e2e \
+            --exclude-tags tool_dump \
+            test/shared/widgets/settings/remote_authorization_settings_card_test.dart
+      - name: Upload test report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-widget-test-report
+          path: |
+            **/build/reports/**/*.html
+            **/test-results/**
+          if-no-files-found: ignore
+
+  # Job 3 — 全量正式测试（可选，确认无跨模块回归）。
+  # 耗时较长（832 个测试文件），独立 job 便于按需触发；验收以 Job 1 为准，
+  # 全量作为补充证据。445 个框架级失败（native windowing）为既有环境限制。
+  full-suite:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Enable Git long paths for Flutter SDK checkout
+        shell: pwsh
+        run: git config --system core.longpaths true
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        shell: bash
+        run: flutter pub get --enforce-lockfile
+      - name: Run full test suite
+        shell: bash
+        run: |
+          flutter test \
+            --reporter expanded \
+            --test-randomize-ordering-seed random \
+            --exclude-tags e2e_evaluation \
+            --exclude-tags debug_provider_e2e \
+            --exclude-tags tool_dump

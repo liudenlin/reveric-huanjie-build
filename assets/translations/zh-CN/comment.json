@@ -1,0 +1,21 @@
+{
+  "comment.action": "批注",
+  "comment.title": "批注",
+  "comment.resolved_title": "批注 · 已解决",
+  "comment.content_hint": "写下你对这一段的想法…",
+  "comment.resolve": "标记为已解决",
+  "comment.reopen": "重新打开",
+  "comment.orphaned": "原文已改",
+  "comment.orphaned_hint": "被批注的原文已被改写，这条批注不再标注在正文上。",
+  "comment.status_label": "批注",
+  "comment.jump_unresolved": "跳到第一条未解决的批注",
+  "comment.category_general": "一般",
+  "comment.category_to_fix": "待修改",
+  "comment.category_to_verify": "需查证",
+  "comment.category_incoherent": "不连贯",
+  "comment.category_conflict": "冲突",
+  "comment.category_need_asset": "需素材",
+  "comment.category_need_discussion": "需讨论",
+  "comment.category_confirmed": "已确认",
+  "comment.category_locked": "已锁定"
+}

@@ -1,0 +1,144 @@
+name: 错误报告
+description: 报告 Reveric 的崩溃、错误或非预期行为
+title: "[错误] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请搜索[已有问题](https://github.com/looplj/reveric/issues)。
+
+        标题请简要概括问题，下面补充操作过程和实际结果。
+
+        反馈内容公开。请移除截图和日志中的 API 密钥、未公开的作品正文及个人信息，不要在此上传数据库或完整诊断包。
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤与实际结果
+      description: 如果偶尔发生，请描述最近一次的操作和发生频率。
+      placeholder: |
+        1. 打开哪个页面或功能：
+        2. 选择了什么配置或模型：
+        3. 输入了什么内容（请用可公开的示例）：
+        4. 点击了哪个按钮：
+        5. 实际出现了什么情况：
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为（选填）
+      description: 你期望发生什么？
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Reveric 版本
+      description: 请填写完整版本号；源码构建请补充提交哈希。
+      placeholder: 例如：0.6.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      options:
+        - Windows
+        - macOS
+        - Android
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 系统版本与设备
+      placeholder: 例如：Windows 11（x64）、macOS 15（Apple M2）或 Android 15（Pixel 9）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题模块
+      description: 可多选涉及的模块；无法判断时请选择「其他或不确定」。
+      multiple: true
+      options:
+        - 安装与启动
+        - 小说编辑与作品设定
+        - 剧本编辑
+        - 画布与分镜
+        - 3D 导演台
+        - 剪辑与成片导出
+        - AI 聊天与工具调用
+        - 图片、视频与音频生成
+        - 供应商与模型配置
+        - 技能与 MCP
+        - 导入、导出与备份
+        - 其他或不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: ai-context
+    attributes:
+      label: AI 配置
+      description: 非 AI 问题填「不涉及」；不清楚的项目注明「不清楚」，也可附供应商及模型配置截图。请遮住密钥。
+      placeholder: |
+        服务来源：官方服务 / 第三方中转 / 本地部署
+        供应商名称：
+        完整模型 ID（请直接复制，不要只填系列名称）：
+    validations:
+      required: true
+
+  - type: dropdown
+    id: interface-format
+    attributes:
+      label: 接口格式
+      description: 请选择应用中配置的接口格式，不要按模型名称推测。非 AI 问题选「不涉及」；选择「其他」时请在 AI 配置中说明。
+      options:
+        - OpenAI 兼容
+        - OpenAI
+        - xAI
+        - Anthropic
+        - Qwen
+        - Gemini
+        - DeepSeek
+        - Moonshot
+        - Zhipu
+        - Doubao
+        - MiniMax
+        - Agnes
+        - Codex
+        - 88API
+        - OOKiAPI
+        - OpenRouter
+        - 火山引擎
+        - 秘塔科技
+        - AtlasCloud
+        - 不涉及
+        - 不清楚
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 错误信息、日志或截图
+      description: |
+        请粘贴完整错误文案或上传截图，不要只填写 400、500 等状态码。如果界面仅显示状态码，也请注明。
+        没有报错时请描述异常画面；无法提供截图或日志时请说明原因。
+        日志只需提供问题发生时的相关片段，并注明大致时间。请移除密钥、私人作品内容和个人信息，不要上传数据库或完整诊断包。
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息
+      description: 新建作品是否也受影响？之前哪个版本正常？重启后是否有变化？
