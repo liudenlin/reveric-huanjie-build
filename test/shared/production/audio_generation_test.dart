@@ -93,7 +93,7 @@ void main() {
   final bytes = Uint8List.fromList(List.generate(64, (i) => i));
   AudioTaskService jobs(
     ProductionAudioInvoke invoke, {
-    Future<Uint8List> Function(Uri)? download,
+    Future<Uint8List> Function(app.AiProvider, Uri)? download,
     ProductionAudioQuery? query,
     Duration pollInterval = Duration.zero,
   }) {
@@ -104,7 +104,7 @@ void main() {
       invoke: invoke,
       query: query,
       pollInterval: pollInterval,
-      download: download ?? (_) async => bytes,
+      download: download ?? (_, _) async => bytes,
       beforeCreate: results.beforeCreate,
       beforeSubmit: results.beforeSubmit,
       recoverSources: results.recover,
@@ -354,7 +354,7 @@ void main() {
           url: Uri.parse('https://cdn.example/audio.wav'),
           providerTaskId: id,
         ),
-        download: (_) async {
+        download: (_, _) async {
           if (++downloads == 1) {
             throw const AudioException('audio_output_unavailable');
           }
@@ -557,8 +557,21 @@ void main() {
       ...canvas.shots.snapshot(clip),
       'model_id': 'music-3.0',
     });
+    final text = await canvas.addText(
+      node.canvasId,
+      content: 'Shared music direction',
+    );
+    await canvas.shots.restoreInputs(clip.id, [
+      ProductionInput.text(text.id).toJson(),
+    ]);
     final frozen = await preview();
     final frozenPrompt = frozen.request.prompt;
+    expect(frozenPrompt, startsWith('Shared music direction'));
+    await canvas.updateText(
+      text.id,
+      title: '',
+      content: 'Changed after preview',
+    );
     await canvas.shots.apply(clip.id, {
       ...canvas.shots.snapshot((await canvas.shots.getShot(clip.id))!),
       'prompt': 'New draft',
@@ -618,7 +631,7 @@ void main() {
           Uint8List(0),
           url: Uri.https('outputs.example', '/result.wav'),
         ),
-        download: (_) {
+        download: (_, _) {
           entered.complete();
           return downloaded.future;
         },
@@ -1085,7 +1098,7 @@ void main() {
         for (final input in reordered.inputs)
           VideoReference(
             role: input.role,
-            url: Uri.https('media.example', '/${input.assetId}'),
+            url: Uri.https('media.example', '/${input.assetId}').toString(),
             mimeType: input.mimeType,
             fileSize: 64,
             mediaInfo: const VideoMediaInfo(durationMs: 3000),
@@ -1170,7 +1183,7 @@ void main() {
       var downloads = 0;
       final restarted = jobs(
         (_, _, _, _) async => throw StateError('Never regenerate'),
-        download: (url) async {
+        download: (_, url) async {
           downloads++;
           expect(url, Uri.https('outputs.example', '/result.wav'));
           return bytes;
@@ -1245,7 +1258,7 @@ void main() {
             url: Uri.https('outputs.example', '/qwen.wav'),
           );
         },
-        download: (url) async {
+        download: (_, url) async {
           downloads++;
           expect(url.path, '/qwen.wav');
           return bytes;
@@ -1260,6 +1273,58 @@ void main() {
       expect(downloads, 1);
     },
   );
+
+  test('audio output retry reads the current provider proxy', () async {
+    final provider = (await appDb.aiProviderDao.getById('audio'))!;
+    await appDb.aiProviderDao.upsert(
+      provider.copyWith(
+        proxyUrl: 'http://127.0.0.1:8001',
+        proxyUsername: 'user',
+        proxyPassword: 'first',
+      ),
+    );
+    final routes = <(String, String, String)>[];
+    final service = jobs(
+      (_, _, _, _) async => AudioGenerationResult(
+        Uint8List(0),
+        url: Uri.https('outputs.example', '/audio.wav'),
+      ),
+      download: (config, url) async {
+        routes.add((
+          config.proxyUrl,
+          config.proxyUsername,
+          config.proxyPassword,
+        ));
+        expect(url, Uri.https('outputs.example', '/audio.wav'));
+        if (routes.length == 1) {
+          throw const AudioException('audio_output_unavailable');
+        }
+        return bytes;
+      },
+    );
+    addTearDown(service.shutdown);
+    final id = await submit(service, await preview());
+    expect(
+      (await service.requireRun(id)).status,
+      GenerationTaskStatus.action_required,
+    );
+    await appDb.aiProviderDao.upsert(
+      provider.copyWith(
+        proxyUrl: 'socks5://127.0.0.1:8002',
+        proxyUsername: 'user',
+        proxyPassword: 'second',
+      ),
+    );
+    await service.retrySaveOutput(id);
+    expect(
+      (await service.requireRun(id)).status,
+      GenerationTaskStatus.completed,
+    );
+    expect(routes, [
+      ('http://127.0.0.1:8001', 'user', 'first'),
+      ('socks5://127.0.0.1:8002', 'user', 'second'),
+    ]);
+  });
 
   test(
     'expired output remains explicitly recoverable and does not regenerate',
@@ -1285,7 +1350,7 @@ void main() {
           );
       final service = jobs(
         (_, _, _, _) async => throw StateError('Never regenerate'),
-        download: (_) async =>
+        download: (_, _) async =>
             throw const AudioException('audio_output_unavailable'),
       );
       await service.recover();
