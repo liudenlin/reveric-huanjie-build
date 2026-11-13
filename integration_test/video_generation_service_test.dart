@@ -8,6 +8,7 @@ import 'package:reveric/shared/models/production/media.dart';
 import 'dart:convert';
 import 'dart:io';
 import '../test/fixtures/video_media.dart';
+import '../test/helpers/fake_object_storage.dart';
 
 import 'package:drift/native.dart';
 import 'package:drift/drift.dart' hide isNull, isNotNull;
@@ -43,28 +44,26 @@ void main() {
         var creates = 0;
         var uploads = 0;
         var queries = 0;
-        final references = ReferenceStorageService(
-          resolveUpload: () async =>
-              ({
+        ReferenceStorageService references(AppDatabase db) =>
+            ReferenceStorageService(
+              database: db,
+              storage: FakeObjectStorage(db, ({
                 required file,
                 required sha256,
                 required mimeType,
                 required fileSize,
               }) async {
                 uploads++;
-                return (
-                  url: Uri.parse('https://reference.test/input'),
-                  expiresAt: null,
-                );
-              },
-          probe: (_) async => const MediaInfo(
-            duration: Duration.zero,
-            hasAudio: false,
-            hasVideo: true,
-            width: 320,
-            height: 320,
-          ),
-        );
+                return (url: 'https://reference.test/input', expiresAt: null);
+              }),
+              probe: (_) async => const MediaInfo(
+                duration: Duration.zero,
+                hasAudio: false,
+                hasVideo: true,
+                width: 320,
+                height: 320,
+              ),
+            );
         ProviderContainer containerFor(
           AppDatabase db, {
           bool resumed = false,
@@ -72,6 +71,8 @@ void main() {
           overrides: [
             appDatabaseProvider.overrideWithValue(db),
             videoTaskServiceProvider.overrideWith((ref) async {
+              final referenceStorage = references(db);
+              ref.onDispose(referenceStorage.dispose);
               final service = VideoTaskService(
                 probeResult: (_) async => const MediaInfo(
                   duration: Duration(seconds: 5),
@@ -83,7 +84,7 @@ void main() {
 
                 database: db,
                 rootDirectory: root,
-                references: references,
+                references: referenceStorage,
                 now: () =>
                     DateTime.now().add(Duration(seconds: resumed ? 11 : 0)),
                 providerTransport: (_) => MockClient((r) async {
@@ -102,7 +103,7 @@ void main() {
                     200,
                   );
                 }),
-                downloadTransport: () => MockClient(
+                downloadTransport: (_) => MockClient(
                   (_) async => http.Response.bytes(
                     base64Decode(videoResultMp4Base64),
                     200,
@@ -170,7 +171,7 @@ void main() {
               id: 'reference',
               type: 'image',
               purpose: 'upload',
-              path: Value(input.path),
+              path: const Value('source.png'),
               content: const Value(ImageAssetContent(mimeType: 'image/png')),
             ),
           );
