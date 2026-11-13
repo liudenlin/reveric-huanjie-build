@@ -5,6 +5,7 @@
 //   lib/shared/services/screenplay/staging.dart
 //   lib/shared/services/director/preview.dart
 import 'dart:async';
+import 'package:reveric/shared/app_config.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/services.dart';
@@ -37,6 +38,9 @@ import 'package:reveric/shared/services/screenplay/staging.dart';
 import 'package:reveric/shared/services/screenplay/staging_edit.dart';
 import 'package:reveric/shared/services/storyboard/service.dart';
 import 'package:reveric/shared/services/production/canvas_service.dart';
+import 'package:reveric/shared/services/production/library_service.dart';
+import 'package:reveric/shared/services/production/media_service.dart';
+import 'package:reveric/shared/services/production/ffmpeg_runner.dart';
 import 'package:reveric/shared/services/working_overlay.dart';
 
 class PreviewContentService extends NovelContentService {
@@ -142,6 +146,15 @@ void main() {
       sessionId: 'session',
       workId: 'work',
       operationHost: ToolOperationHost(operations),
+      productionStyleServiceBuilder: () async => ProductionCanvasService(
+        StoryboardService(db),
+        MediaLibraryService(
+          app,
+          MediaService(FfmpegRunner()),
+          previewDirectory,
+        ),
+        'work',
+      ),
     )..registerAllTools();
   });
   tearDown(() async {
@@ -196,6 +209,60 @@ void main() {
     'visible': true,
     'color': '#B7A48B',
   };
+
+  test(
+    'text Remove and remove_types clean only their downstream prompt references',
+    () async {
+      final path = canvasPath;
+      final a = await call('Create', '$path/nodes', {
+        'type': 'text',
+        'content': 'A',
+      });
+      final b = await call('Create', '$path/nodes', {
+        'type': 'text',
+        'content': 'B',
+      });
+      final target = await call('Create', '$path/nodes', {
+        'type': 'image',
+        'title': 'Kept',
+      });
+      expect(a['ok'], true, reason: '$a');
+      expect(b['ok'], true, reason: '$b');
+      expect(target['ok'], true, reason: '$target');
+      final clipId = target['ref_id'] as String;
+      const aTag = '<ref input_id="a" label="A" />';
+      const bTag = '<ref input_id="b" label="B" />';
+      // This fixture has no media host; seed inputs before exercising AI deletion.
+      final shots = StoryboardService(db);
+      await shots.restoreInputs(clipId, [
+        {'id': 'a', 'ref_type': 'node', 'ref_id': a['id'], 'role': 'prompt'},
+        {'id': 'b', 'ref_type': 'node', 'ref_id': b['id'], 'role': 'prompt'},
+      ]);
+      await (db.update(
+        db.productionClips,
+      )..where((t) => t.id.equals(clipId))).write(
+        const ProductionClipsCompanion(
+          prompt: Value('Start $aTag/$bTag/$aTag end'),
+        ),
+      );
+      final removed = await call('Remove', '$path/nodes/${a['id']}');
+      expect(removed['ok'], true, reason: '$removed');
+      var clip = (await shots.getShot(clipId))!;
+      expect(clip.prompt, 'Start /$bTag/ end');
+      expect(clip.inputs.map((input) => input.id), ['b']);
+      final batched = await call('Write', path, {
+        'remove_types': ['text'],
+      });
+      expect(batched['ok'], true, reason: '$batched');
+      jsonEncode(batched);
+      clip = (await shots.getShot(clipId))!;
+      expect(clip.prompt, 'Start // end');
+      expect(clip.inputs, isEmpty);
+      expect(clip.title, 'Kept');
+      expect(await db.canvasDao.getNodeById(target['id'] as String), isNotNull);
+      expect(await db.canvasDao.getNodeById(b['id'] as String), isNull);
+    },
+  );
 
   test(
     'stagings normalizes plural IDs without advertising the alias',
@@ -570,6 +637,36 @@ void main() {
     ok(await director('read', {'staging_id': stored.stagingId}));
   });
 
+  test('screenplay adds text content while rejecting editing nodes', () async {
+    final existingProjects = (await db.editingDao.list())
+        .map((row) => row.id)
+        .toList();
+    final text = await call('Create', '$canvasPath/nodes', {
+      'type': 'text',
+      'title': 'Notes',
+      'content': 'Shared text',
+    });
+    ok(text);
+    expect(
+      (await call('Read', '$canvasPath/nodes/${text['id']}/content'))['value'],
+      'Shared text',
+    );
+    ok(
+      await call('Write', '$canvasPath/nodes/${text['id']}', {
+        'content': 'Updated',
+      }),
+    );
+    expect(
+      (await db.canvasDao.getNodeById(text['id'] as String))!.content,
+      'Updated',
+    );
+    expect(
+      (await call('Create', '$canvasPath/nodes', {'type': 'editing'}))['error'],
+      isNotNull,
+    );
+    expect((await db.editingDao.list()).map((row) => row.id), existingProjects);
+  });
+
   test(
     'explicit production paths work without discovering hidden resources',
     () async {
@@ -594,10 +691,11 @@ void main() {
       ok(all);
       expect(all['nodes'], hasLength(2));
       expect(all['edges'], isEmpty);
-      // 构思画布集合按 ENABLE_IDEATION_CANVAS 门控；关闭时裸 canvas 路径不在
-      // 资源表内，Read 直接报 Unknown collection，不应在此处断言其 listing。
+      final ideation = await call('Read', 'canvas');
       if (ideationCanvasEnabled) {
-        expect((await call('Read', 'canvas'))['entries'], isEmpty);
+        expect(ideation['entries'], isEmpty);
+      } else {
+        expect(ideation['error'], isNotNull);
       }
       final glob = await tools.executeTool(
         name: 'Glob',
@@ -1613,6 +1711,10 @@ void main() {
       });
       expect(unknown['error_code'], 'not_found');
       expect(unknown['error'], contains('Run stagings list'));
+      final unknownAction = await director('not-a-staging-action', {});
+      expect(unknownAction['output'], contains('unknown stagings command'));
+      expect(unknownAction['output'], contains('剧本工具使用规范'));
+      expect(unknownAction['output'], isNot(contains('画布作品工具')));
       expect((await stagingService.require(stagingId)).version, before.version);
     },
   );
