@@ -48,6 +48,7 @@ import 'openrouter.dart';
 import 'purefox.dart';
 import '../new_api.dart';
 import 'reference_storage_service.dart';
+import '../../../models/video/capabilities.dart';
 import 'wan.dart';
 
 final _log = AppLogger.forModule('VideoTasks');
@@ -78,13 +79,15 @@ class VideoTaskService {
     this.recoverSources,
     this.sourceName,
     http.Client Function(AiProvider)? providerTransport,
-    http.Client Function()? downloadTransport,
+    http.Client Function(AiProvider)? downloadTransport,
     DateTime Function()? now,
     Random? random,
   }) : providerTransport =
            providerTransport ??
            ((provider) => provider.createProxyClient() ?? http.Client()),
-       downloadTransport = downloadTransport ?? http.Client.new,
+       downloadTransport =
+           downloadTransport ??
+           ((provider) => provider.createProxyClient() ?? http.Client()),
        now = now ?? DateTime.now,
        random = random ?? Random();
 
@@ -100,7 +103,7 @@ class VideoTaskService {
   final Directory rootDirectory;
   final ReferenceStorageService references;
   final http.Client Function(AiProvider) providerTransport;
-  final http.Client Function() downloadTransport;
+  final http.Client Function(AiProvider) downloadTransport;
   final DateTime Function() now;
   final Random random;
   final _busy = <String>{};
@@ -463,8 +466,8 @@ class VideoTaskService {
           await _cancelUnsubmitted(task)) {
         return;
       }
-      final prepared = await _prepare(task);
       final provider = await _provider(task);
+      final prepared = await _prepare(task, provider);
       final transport = providerTransport(provider);
       _clients.add(transport);
       try {
@@ -476,12 +479,13 @@ class VideoTaskService {
           draftId = source.providerTaskId!;
         }
         // Complete capability validation before entering the uncertain POST window.
-        client.encodeSubmission(
+        final body = client.encodeSubmission(
           task.videoRequest,
           prepared,
           draft: task.draft,
           draftId: draftId,
         );
+        client.validateInlineBody(body, prepared);
         final submitting = await database.transaction(() async {
           final current = await _task(id);
           if (current.status != GenerationTaskStatus.uploading ||
@@ -584,7 +588,10 @@ class VideoTaskService {
         : null;
   }
 
-  Future<List<VideoReference>> _prepare(GenerationTask task) async {
+  Future<List<VideoReference>> _prepare(
+    GenerationTask task,
+    AiProvider provider,
+  ) async {
     final prepared = <VideoReference>[];
     if (task.draftTaskId != null) {
       return prepared;
@@ -593,6 +600,8 @@ class VideoTaskService {
       task.providerType,
       task.modelId,
     );
+    final local = <VideoReference>[];
+    final files = <File>[];
     for (final input in task.videoInputs) {
       _requireActive();
       final asset = await database.assetDao.getAsset(input.assetId);
@@ -603,30 +612,63 @@ class VideoTaskService {
         );
       }
       final file = _file(asset!.path!);
+      files.add(file);
+      final info = await probeResult(file.path);
+      local.add(
+        VideoReference(
+          role: input.role,
+          url: file.uri.toString(),
+          mimeType: input.mimeType,
+          fileSize: await file.length(),
+          mediaInfo: VideoMediaInfo(
+            width: info.width,
+            height: info.height,
+            durationMs: info.duration.inMilliseconds,
+            frameRate: info.frameRate,
+          ),
+        ),
+      );
+    }
+    VideoCapabilities(provider.type).validateLocal(task.videoRequest, local);
+
+    final certifiedReferences = <String, String>{};
+    final uploads = <(VideoInput, File, VideoMediaInfo)>[];
+    for (final (index, input) in task.videoInputs.indexed) {
       final certified = await _certifiedAsset(
         input.assetId,
         task.providerId,
         providerAssets,
       );
       if (certified != null) {
-        final info = await probeResult(file.path);
+        certifiedReferences[input.assetId] = providerAssetUri(
+          certified.remoteId!,
+        );
+      } else {
+        uploads.add((input, files[index], local[index].mediaInfo));
+      }
+    }
+    _requireActive();
+    final uploaded = (await references.prepare(
+      uploads,
+      provider: provider,
+    )).iterator;
+    for (final (index, input) in task.videoInputs.indexed) {
+      final certifiedUrl = certifiedReferences[input.assetId];
+      if (certifiedUrl != null) {
+        final ref = local[index];
         prepared.add(
           VideoReference(
-            role: input.role,
-            url: Uri.parse(providerAssetUri(certified.remoteId!)),
-            mimeType: input.mimeType,
-            fileSize: await file.length(),
-            mediaInfo: VideoMediaInfo(
-              width: info.width,
-              height: info.height,
-              durationMs: info.duration.inMilliseconds,
-              frameRate: info.frameRate,
-            ),
+            role: ref.role,
+            url: certifiedUrl,
+            mimeType: ref.mimeType,
+            fileSize: ref.fileSize,
+            mediaInfo: ref.mediaInfo,
           ),
         );
-        continue;
+      } else {
+        uploaded.moveNext();
+        prepared.add(uploaded.current);
       }
-      prepared.add(await references.ensure(input, file));
     }
     return prepared;
   }
@@ -642,6 +684,7 @@ class VideoTaskService {
   })();
   Future<void> _start() async {
     _requireActive();
+    await references.resume();
     for (final task in await database.generationTaskDao.recoverable(
       kind: GenerationKind.video,
     )) {
@@ -662,11 +705,6 @@ class VideoTaskService {
       } else if (task.status == GenerationTaskStatus.prepared ||
           task.status == GenerationTaskStatus.uploading) {
         try {
-          if (_online &&
-              task.status == GenerationTaskStatus.uploading &&
-              await database.appSettingsDao.get(_consentKey) == 'true') {
-            await _prepare(task);
-          }
           await _status(
             task,
             GenerationTaskStatus.prepared,
@@ -782,7 +820,7 @@ class VideoTaskService {
             return;
           }
           task = await _task(id);
-          await _save(task, result.videoUrl!, client, submission);
+          await _save(task, result.videoUrl!, client, submission, provider);
         case VideoRemoteStatus.failed:
           await _status(
             task,
@@ -831,6 +869,7 @@ class VideoTaskService {
     Uri url,
     VideoClient api,
     VideoSubmission submission,
+    AiProvider provider,
   ) async {
     final relative = RevericPaths.mediaPath(
       task.novelId,
@@ -841,7 +880,7 @@ class VideoTaskService {
     await target.parent.create(recursive: true);
     final partial = File('${target.path}.part');
 
-    final client = downloadTransport();
+    final client = downloadTransport(provider);
     _clients.add(client);
     final sink = partial.openWrite();
     try {
