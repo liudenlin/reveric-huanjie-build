@@ -61,10 +61,11 @@ extension _StagingsCommands on _AiToolManagerBase {
     String action,
     Map<String, dynamic> options,
   ) async {
-    if (contentKind != contentKindScreenplay) {
+    if (contentKind != contentKindScreenplay &&
+        contentKind != contentKindCanvas) {
       throw const ToolOperationException(
         'unavailable',
-        'Staging commands require a screenplay work.',
+        'Staging commands require a screenplay or canvas work.',
       );
     }
     final allowed = switch (action) {
@@ -79,7 +80,7 @@ extension _StagingsCommands on _AiToolManagerBase {
       'restore' => {'staging_id', 'version'},
       'remove' || 'preview' => {'staging_id'},
       _ => throw _RunCommandException(
-        'Unknown staging action. ${_bundledSkillCommandGuidance('stagings')}',
+        'Unknown staging action. ${_bundledSkillCommandGuidance('stagings', contentKind: contentKind)}',
       ),
     };
     // 只在执行边界兼容复数别名，后续校验和执行统一使用规范参数。
