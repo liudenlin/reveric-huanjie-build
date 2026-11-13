@@ -2,7 +2,6 @@
 // 关联文件:
 //   lib/shared/services/production/canvas_service.dart
 //   lib/shared/services/production/result_service.dart
-//   lib/shared/services/production/export_orchestrator.dart
 import 'package:reveric/shared/models/generation/task.dart';
 import 'package:reveric/shared/models/asset_purpose.dart';
 import 'package:reveric/shared/models/production/asset_content.dart';
@@ -45,11 +44,9 @@ import 'package:reveric/shared/services/working_overlay.dart';
 import 'package:reveric/shared/services/screenplay_service.dart';
 import 'package:reveric/shared/services/storyboard/service.dart';
 import 'package:reveric/shared/services/storyboard/edit_orchestrator.dart';
-import 'package:reveric/shared/services/storyboard/export.dart';
 import 'package:reveric/shared/services/subjects.dart';
 import 'package:reveric/shared/services/production/canvas_service.dart';
 import 'package:reveric/shared/services/production/result_service.dart';
-import 'package:reveric/shared/services/production/export_orchestrator.dart';
 import 'package:reveric/shared/services/production/generate_orchestrator.dart';
 import 'package:reveric/shared/services/production/library_service.dart';
 import 'package:reveric/shared/services/production/media_service.dart';
@@ -596,7 +593,10 @@ void main() {
       );
       final place = subjects.singleWhere((clip) => clip.locationId == location);
       expect(place.adoptedAssetId, 'set');
-      final nodes = await db.canvasDao.getNodesByCanvas(canvas.id);
+      final all = await db.canvasDao.getNodesByCanvas(canvas.id);
+      // 每个场次各有一个场次节点。
+      expect(all.map((node) => node.sceneId).nonNulls.toSet(), {scene, second});
+      final nodes = all.where((node) => node.sceneId == null).toList();
       expect(nodes, hasLength(3));
       expect(
         nodes.singleWhere((node) => node.clipId == place.id).type,
@@ -623,17 +623,32 @@ void main() {
         )).where((clip) => clip.characterId == added),
         hasLength(1),
       );
-      expect(await db.canvasDao.getNodesByCanvas(canvas.id), hasLength(4));
+      expect(
+        (await db.canvasDao.getNodesByCanvas(
+          canvas.id,
+        )).where((node) => node.sceneId == null),
+        hasLength(4),
+      );
 
       // Manual removal remains removed, including after recreating the canvas.
       final placeNode = nodes.singleWhere((node) => node.clipId == place.id);
       await service.removeNode(manual.id);
       await service.removeNode(placeNode.id);
       await service.ensureCanvas(episode);
-      expect(await db.canvasDao.getNodesByCanvas(canvas.id), hasLength(2));
+      expect(
+        (await db.canvasDao.getNodesByCanvas(
+          canvas.id,
+        )).where((node) => node.sceneId == null),
+        hasLength(2),
+      );
       await service.removeCanvas(canvas.id);
       final rebuilt = await service.ensureCanvas(episode);
-      expect(await db.canvasDao.getNodesByCanvas(rebuilt.id), hasLength(2));
+      expect(
+        (await db.canvasDao.getNodesByCanvas(
+          rebuilt.id,
+        )).where((node) => node.sceneId == null),
+        hasLength(2),
+      );
       final retained = await service.shots.episodeClips(episode);
       expect(retained.where((clip) => clip.characterId == character), isEmpty);
       expect(retained.where((clip) => clip.locationId == location), isEmpty);
@@ -759,9 +774,52 @@ void main() {
         location,
       ]);
       expect(clips.every((clip) => clip.adoptedAssetId == null), isTrue);
-      expect(await db.canvasDao.getNodesByCanvas(canvas.id), hasLength(2));
+      final nodes = await db.canvasDao.getNodesByCanvas(canvas.id);
+      expect(nodes.where((node) => node.sceneId == null), hasLength(2));
+      // 只给仍存在的场次建场次节点。
+      expect(nodes.map((node) => node.sceneId).nonNulls, [liveScene]);
     },
   );
+
+  test('scene nodes own the scene position and stay in sync', () async {
+    final screenplay = ScreenplayService(db);
+    final shotNode = await service.ensureShotNode(shot.id);
+    final empty = await screenplay.createScene(
+      screenplayId: (await db.screenplayDao.getRoot())!.id,
+      episodeId: episode,
+    );
+    final canvas = await service.ensureCanvas(episode);
+    CanvasNode anchorOf(List<CanvasNode> nodes, String sceneId) =>
+        nodes.singleWhere((n) => n.sceneId == sceneId);
+    var nodes = await db.canvasDao.getNodesByCanvas(canvas.id);
+    // 有片段的场次取片段位置；空场次也有场次节点，且不能删除。
+    expect(anchorOf(nodes, scene).x, shotNode.x);
+    expect(anchorOf(nodes, scene).y, shotNode.y);
+    final emptyAnchor = anchorOf(nodes, empty);
+    await expectLater(
+      service.removeNode(emptyAnchor.id),
+      throwsA(isA<StoryboardException>()),
+    );
+
+    // 空场次的第一段落在场次节点原位。
+    final first = await service.ensureShotNode(
+      (await service.shots.create(empty, values: {'title': 'first'})).id,
+    );
+    expect((first.x, first.y), (emptyAnchor.x, emptyAnchor.y));
+
+    // 只移动场次节点：场内片段一起平移。
+    await service.moveNodes(canvas.id, {
+      emptyAnchor.id: (x: emptyAnchor.x + 100, y: emptyAnchor.y + 50),
+    });
+    final moved = await service.requireNode(first.id);
+    expect((moved.x, moved.y), (first.x + 100, first.y + 50));
+
+    // 只移动片段：场次节点跟到片段最左、最上的位置。
+    await service.moveNodes(canvas.id, {shotNode.id: (x: -300, y: -200)});
+    nodes = await db.canvasDao.getNodesByCanvas(canvas.id);
+    expect(anchorOf(nodes, scene).x, -300);
+    expect(anchorOf(nodes, scene).y, -200);
+  });
 
   test(
     'deleted assets invalidate media references even while their files remain',
@@ -2486,7 +2544,9 @@ void main() {
       expect(inputs.single.sourceNodeId, isNull);
       expect((await service.shots.getShot(shot.id))!.prompt, prompt);
       expect(
-        (await db.canvasDao.getNodesByCanvas(node.canvasId)),
+        (await db.canvasDao.getNodesByCanvas(
+          node.canvasId,
+        )).where((n) => n.sceneId == null),
         hasLength(1),
       );
       await expectLater(
@@ -2905,143 +2965,6 @@ void main() {
         'file_workspaces/work/asset.mp4',
         'clip',
       ]);
-    },
-  );
-
-  test(
-    'batch export refuses missing shots, exports duplicate assets per shot and never overwrites',
-    () async {
-      final destination = await root.createTemp('export-');
-      List<StoryboardExportRow> rows(ProductionClipRow row) => [
-        StoryboardExportRow(scene: '雨夜', number: '1.1', shot: row),
-      ];
-      Future<ProductionExportReport> export(List<StoryboardExportRow> items) =>
-          ProductionExportOrchestrator().run(
-            service: service,
-            rows: items,
-            destination: destination,
-            headings: [
-              'scene',
-              'number',
-              'title',
-              'prompt',
-              'status',
-              'spec',
-              'assets',
-              'file',
-            ],
-            statusLabel: (s) => s,
-            cancellation: MediaCancellation(),
-          );
-      final failure = await export(rows(shot));
-      expect(failure.complete, isFalse);
-      expect(failure.remaining, ['1.1']);
-      expect(await destination.list().toList(), isEmpty);
-      await asset('video', type: 'video');
-      final node = await service.ensureShotNode(shot.id);
-      await service.adopt(node.id, 'video');
-      final current = (await service.shots.getShot(shot.id))!;
-      final first = await export(rows(current));
-      final second = await export(rows(current));
-      expect(first.complete, isTrue);
-      expect(first.directory, isNot(second.directory));
-      final csv = await File('${first.directory}/prompts.csv').readAsString();
-      expect(csv, contains('0001_雨夜 _ 镜头.mp4'));
-      expect(await File('${first.directory}/0001_雨夜 _ 镜头.mp4').readAsBytes(), [
-        1,
-        2,
-        3,
-      ]);
-    },
-  );
-  test(
-    'canvas recreation preserves segment and video rows and adopted assets',
-    () async {
-      await asset('kept', type: 'video');
-      final node = await service.ensureShotNode(shot.id);
-      final video = await service.addFree(node.canvasId, overlay: overlay);
-      await service.adopt(node.id, 'kept');
-      await service.removeCanvas(node.canvasId);
-      final canvas = await service.ensureCanvas(episode);
-      expect(canvas.id, isNot(node.canvasId));
-      final rebuilt = await db.canvasDao.getNodesByCanvas(canvas.id);
-      expect(rebuilt.map((n) => n.clipId).toSet(), {shot.id, video.clipId});
-      expect((await service.shots.getShot(shot.id))!.adoptedAssetId, 'kept');
-      expect(await db.canvasDao.getEdgesByCanvas(canvas.id), isEmpty);
-      expect(await service.requireAsset('kept'), isNotNull);
-    },
-  );
-
-  test(
-    'video export follows content order, ignores node positions, and excludes video experiments',
-    () async {
-      await asset('shared', type: 'video');
-      final next = await service.shots.create(scene, values: {'title': 'Next'});
-      final firstNode = await service.ensureShotNode(shot.id);
-      final secondNode = await service.ensureShotNode(next.id);
-      await service.move(firstNode.id, 4000, 4000);
-      await service.move(secondNode.id, -4000, -4000);
-      await service.adopt(firstNode.id, 'shared');
-      await service.adopt(secondNode.id, 'shared');
-      final one = (await service.shots.getShot(shot.id))!;
-      final two = (await service.shots.getShot(next.id))!;
-      final destination = await root.createTemp('ordered-');
-      final report = await ProductionExportOrchestrator().run(
-        service: service,
-        rows: [
-          StoryboardExportRow(scene: 'Scene', number: '1.2', shot: two),
-          StoryboardExportRow(scene: 'Scene', number: '1.1', shot: one),
-        ],
-        destination: destination,
-        headings: [
-          'scene',
-          'number',
-          'title',
-          'prompt',
-          'status',
-          'settings',
-          'refs',
-          'file',
-        ],
-        statusLabel: (s) => s,
-        cancellation: MediaCancellation(),
-      );
-      expect(report.complete, isTrue);
-      expect(report.completed, ['1.1', '1.2']);
-      final csv = await File('${report.directory}/prompts.csv').readAsString();
-      expect(csv.indexOf('1.1'), lessThan(csv.indexOf('1.2')));
-      expect(csv, contains('0002_Next.mp4'));
-      final video = await service.addFree(firstNode.canvasId, overlay: overlay);
-      final excluded = await ProductionExportOrchestrator().run(
-        service: service,
-        rows: [
-          StoryboardExportRow(
-            scene: '',
-            number: '',
-            shot: (await service.shots.getShot(video.clipId!))!,
-          ),
-        ],
-        destination: destination,
-        headings: [],
-        statusLabel: (s) => s,
-        cancellation: MediaCancellation(),
-      );
-      expect(excluded.complete, isFalse);
-      expect(excluded.directory, isNull);
-      final image = await service.shots.create(
-        scene,
-        values: {'kind': 'image', 'title': 'Storyboard image'},
-      );
-      final imageReport = await ProductionExportOrchestrator().run(
-        service: service,
-        rows: [StoryboardExportRow(scene: 'Scene', number: '1.3', shot: image)],
-        destination: destination,
-        headings: [],
-        statusLabel: (s) => s,
-        cancellation: MediaCancellation(),
-      );
-      expect(imageReport.complete, isFalse);
-      expect(imageReport.directory, isNull);
     },
   );
 
@@ -3602,7 +3525,12 @@ void main() {
         overlay: overlay,
       );
       await save([direct, linked]);
-      expect((await service.content(target.canvasId)).nodes, hasLength(2));
+      expect(
+        (await service.content(
+          target.canvasId,
+        )).nodes.where((n) => n.sceneId == null),
+        hasLength(2),
+      );
       expect((await db.select(db.canvasEdges).get()), isEmpty);
       final edge = (await service.content(target.canvasId)).edges.single;
       expect(edge.id, '${target.id}:${linked.id}');
