@@ -55,6 +55,7 @@ import '../../localization/locale_keys.dart';
 import '../../logger/app_logger.dart';
 import '../../models/map_studio_nav.dart' show mapTopLevelWorldOf;
 import '../../models/agent_skill.dart';
+import '../../models/content_kind.dart';
 import '../../models/ai_chat_models.dart';
 import '../../models/ai_run_failure.dart';
 import '../../models/novel_agent_skill.dart';
