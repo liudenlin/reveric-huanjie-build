@@ -82,7 +82,7 @@ VideoMode productionSubmitMode(
 List<ProductionInput> productionInputsWithVoices(
   List<ProductionInput> inputs,
 ) => [
-  for (final input in inputs) ...[
+  for (final input in inputs.where((input) => !input.isPrompt)) ...[
     input,
     if (input.voiceAssetId != null)
       ProductionInput(
@@ -162,8 +162,9 @@ List<VideoReferenceSlot> productionSlots(
 VideoRequest compileProductionPrompt(
   String providerType,
   VideoRequest raw,
-  List<ResolvedProductionInput> inputs,
-) {
+  List<ResolvedProductionInput> inputs, {
+  Map<String, String> textInputs = const {},
+}) {
   final parsed = StoryboardPrompt.parse(raw.prompt);
   final slots = productionSlots(
     productionProtocol(providerType),
@@ -180,16 +181,16 @@ VideoRequest compileProductionPrompt(
   if (inputs.map((s) => s.id).toSet().length != slots.length) {
     throw const StoryboardException('invalid_reference');
   }
-  final text = parsed.parts.map((part) {
-    if (!part.isReference) {
-      return part.text;
-    }
-    final slot = slots.where((s) => s.inputId == part.inputId).firstOrNull;
-    if (slot == null) {
-      throw const StoryboardException('invalid_reference');
-    }
-    return slot.slot;
-  }).join();
+  final text = parsed.render(
+    textInputs: textInputs,
+    reference: (part) {
+      final slot = slots.where((s) => s.inputId == part.inputId).firstOrNull;
+      if (slot == null) {
+        throw const StoryboardException('invalid_reference');
+      }
+      return slot.slot;
+    },
+  );
   final middleFrameIds = [
     for (final input in inputs)
       if (input.role == VideoInputRole.middle_frame) input.id,
@@ -240,7 +241,10 @@ VideoRequest compileProductionPrompt(
     durationSeconds: raw.durationSeconds,
     audio: raw.audio ?? defaults?.audio,
     promptExtend: raw.promptExtend ?? defaults?.promptExtend,
-    originalPrompt: raw.prompt,
+    originalPrompt: parsed.render(
+      textInputs: textInputs,
+      reference: (part) => part.text,
+    ),
     referenceSlots: slots,
   );
 }
@@ -272,13 +276,27 @@ class ProductionGenerateOrchestrator {
     final shot = node.clipId == null
         ? null
         : await service.shots.getShot(node.clipId!);
-    final raw = shot == null ? null : shotVideoRequest(shot);
-    final providerId = shot?.providerId;
-    if (shot?.kind != 'video' ||
-        raw == null ||
-        providerId == null ||
-        (shot?.durationMs != null && shot!.durationMs! % 1000 != 0)) {
-      throw const StoryboardException('invalid_config');
+    if (shot == null || shot.kind != 'video') {
+      throw const StoryboardException(
+        'invalid_config',
+        'Only video clips can generate video.',
+      );
+    }
+    final raw = shotVideoRequest(shot);
+    final providerId = shot.providerId;
+    if (providerId == null) {
+      throw const StoryboardException(
+        'invalid_config',
+        'provider_id and model_id are not set.',
+      );
+    }
+    final durationMs = shot.durationMs;
+    if (durationMs != null && durationMs % 1000 != 0) {
+      throw StoryboardException(
+        'invalid_config',
+        'duration_ms is in milliseconds and must be whole seconds '
+            '(4 s = 4000); current value: $durationMs.',
+      );
     }
     final provider = await service.library.database.aiProviderDao.getById(
       providerId,
@@ -300,7 +318,9 @@ class ProductionGenerateOrchestrator {
         field: 'draft',
       );
     }
-    final savedInputs = await service.inputs(nodeId);
+    final allInputs = await service.inputs(nodeId);
+    final textInputs = await service.promptTexts(allInputs);
+    final savedInputs = allInputs.where((input) => !input.isPrompt).toList();
     for (final input in savedInputs.where((i) => i.voiceAssetId != null)) {
       if (productionUsesFrames(raw.mode)) {
         throw const VideoException(
@@ -345,7 +365,7 @@ class ProductionGenerateOrchestrator {
       references.add(
         VideoReference(
           role: role,
-          url: Uri.https('local.invalid', '/preview'),
+          url: 'https://local.invalid/preview',
           mimeType: media.mimeType,
           fileSize: await file.length(),
           mediaInfo: VideoMediaInfo(
@@ -376,8 +396,9 @@ class ProductionGenerateOrchestrator {
             : null,
       ),
       ordered,
+      textInputs: textInputs,
     );
-    final style = await service.effectiveStyle(shot!);
+    final style = await service.effectiveStyle(shot);
     final request = compiled.withPrompt(
       style?.assemble(compiled.prompt) ?? compiled.prompt,
     );
