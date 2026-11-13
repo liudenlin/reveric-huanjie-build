@@ -32,6 +32,7 @@ import 'dart:math';
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../providers/async_read.dart';
@@ -59,7 +60,6 @@ import '../../models/ai_run_failure.dart';
 import '../../models/novel_agent_skill.dart';
 import '../../models/ai_provider.dart';
 import '../../models/ai_session_mode.dart';
-import '../../models/content_kind.dart';
 import '../../models/models_catalog.dart';
 import '../../models/queued_chat_message.dart';
 import '../../utils/storage_paths.dart';
@@ -667,6 +667,7 @@ class ChatTurnRunner {
               container
                   .read(novelContentServiceProvider(operationDatabasePath))
                   .database,
+              contentKind: novel.contentKind,
             ),
             container.read(mediaLibraryServiceProvider),
             novel.id,
@@ -793,6 +794,18 @@ class ChatTurnRunner {
     };
   }
 
+  @visibleForTesting
+  Future<
+    ({List<String> names, Future<AgentSkillLoadResult?> Function(String)? load})
+  >
+  skillContextForTest() async {
+    final context = await _loadCurrentSkillContext(promptContext.contentKind);
+    return (
+      names: context.summaries.map((skill) => skill.name).toList(),
+      load: context.loader,
+    );
+  }
+
   Future<_ChatSkillContext> _loadCurrentSkillContext(String contentKind) async {
     // R-33 任务级快照：本轮一次性读取 user 层，与宿主注入的 project 层一起
     // 固化为快照；执行中途改技能不会影响同一任务后续加载（禁止热更新隐式
@@ -839,6 +852,7 @@ class ChatTurnRunner {
       final bundled = await const BundledControlSkillsLoader().findByCallName(
         rootBundle,
         callName,
+        contentKind: contentKind,
       );
       if (bundled != null) {
         bundledFallback.add(bundled);
@@ -1202,8 +1216,10 @@ class ChatTurnRunner {
           : _editImage,
       subAgentListProvider: () => availableSubAgents,
       skillLoader: (slug) async => null,
-      agentSkillsCommandCallback: (command) =>
-          AgentSkillsRunCommandHandler(container: container).run(command),
+      agentSkillsCommandCallback: (command) => AgentSkillsRunCommandHandler(
+        container: container,
+        contentKind: novel.contentKind,
+      ).run(command),
       themesCommandCallback: (command) => container
           .read(appSettingsNotifierProvider.notifier)
           .runThemeCommand(command),
@@ -1451,8 +1467,10 @@ class ChatTurnRunner {
                 _suggestNextAction(sessionId, callId, suggestions)
           : null,
       skillLoader: (slug) async => null,
-      agentSkillsCommandCallback: (command) =>
-          AgentSkillsRunCommandHandler(container: container).run(command),
+      agentSkillsCommandCallback: (command) => AgentSkillsRunCommandHandler(
+        container: container,
+        contentKind: novel.contentKind,
+      ).run(command),
       themesCommandCallback: (command) => container
           .read(appSettingsNotifierProvider.notifier)
           .runThemeCommand(command),
