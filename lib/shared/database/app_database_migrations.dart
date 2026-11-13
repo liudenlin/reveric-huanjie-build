@@ -104,6 +104,27 @@ class AppDatabaseMigrations {
     }
   }
 
+  /// v7: 官方 v0.9.0 provider_assets 列扩展的后补迁移。
+  ///
+  /// 官方把 kind/context_hash/remote_url/expires_at 加进了 v5，但 v5 已被
+  /// 既有库（user_version>=5）跳过，导致从旧库升级漏加列（现象：
+  /// [VideoTasks] startup recovery failed / no such column: "kind"）。
+  /// 幂等：列已存在则跳过，不重复执行，不破坏既有数据。
+  Future<void> migrateToV7(Migrator m) async {
+    if (!await _tableHasColumn('provider_assets', 'kind')) {
+      await m.addColumn(db.providerAssets, db.providerAssets.kind);
+    }
+    if (!await _tableHasColumn('provider_assets', 'context_hash')) {
+      await m.addColumn(db.providerAssets, db.providerAssets.contextHash);
+    }
+    if (!await _tableHasColumn('provider_assets', 'remote_url')) {
+      await m.addColumn(db.providerAssets, db.providerAssets.remoteUrl);
+    }
+    if (!await _tableHasColumn('provider_assets', 'expires_at')) {
+      await m.addColumn(db.providerAssets, db.providerAssets.expiresAt);
+    }
+  }
+
   /// 默认集合按状态筛选，两个库都适用，迁移后仍共用（content_kind 为 null）。
   static const _sharedCollectionIds = [
     'collection:all',
