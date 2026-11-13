@@ -51,24 +51,45 @@ class AppDatabaseMigrations {
     await _splitCollectionsByContentKind();
   }
 
-  /// v5: 远程渠道授权正式数据表（替代 app_settings JSON 存储）。
+  /// v5: 远程渠道授权正式数据表（替代 app_settings JSON 存储）+ 普通上传与
+  /// 认证记录隔离（provider_assets 列扩展，保存读取地址与有效期）。
   ///
   /// 幂等：表已存在（中断恢复 / 重复升级）则跳过建表，仅补索引
-  /// （CREATE UNIQUE INDEX IF NOT EXISTS 本身幂等）。不修改 v2/v3/v4
-  /// 历史语义，不破坏既有数据。
+  /// （CREATE UNIQUE INDEX IF NOT EXISTS 本身幂等）；provider_assets 列已
+  /// 存在则跳过加列。不修改 v2/v3/v4 历史语义，不破坏既有数据。
   Future<void> migrateToV5(Migrator m) async {
+    // 官方 v0.9.0：普通上传与认证记录隔离。
+    if (!await _tableHasColumn('provider_assets', 'kind')) {
+      await m.addColumn(db.providerAssets, db.providerAssets.kind);
+    }
+    if (!await _tableHasColumn('provider_assets', 'context_hash')) {
+      await m.addColumn(db.providerAssets, db.providerAssets.contextHash);
+    }
+    if (!await _tableHasColumn('provider_assets', 'remote_url')) {
+      await m.addColumn(db.providerAssets, db.providerAssets.remoteUrl);
+    }
+    if (!await _tableHasColumn('provider_assets', 'expires_at')) {
+      await m.addColumn(db.providerAssets, db.providerAssets.expiresAt);
+    }
+    // 用户 R-33：远程渠道授权正式数据表。
     if (!await _tableExists('remote_authorizations')) {
       await m.createTable(db.remoteAuthorizations);
     }
     await createRemoteAuthorizationIndexes(m.database);
   }
 
-  /// v6: 远程授权审计持久化表（追加式事件记录，P0-B B3）。
+  /// v6: 同次图片任务的有序候选结果（官方）+ 远程授权审计持久化表
+  /// （追加式事件记录，P0-B B3）+ R-33 project 层 AgentSkill 覆盖表。
   ///
   /// 幂等：表已存在（中断恢复 / 重复升级）则跳过建表，仅补索引
-  /// （CREATE INDEX IF NOT EXISTS 本身幂等）。不修改 v2-v5 历史语义，
-  /// 不破坏既有数据。
+  /// （CREATE INDEX IF NOT EXISTS 本身幂等）；列已存在则跳过加列。
+  /// 不修改 v2-v5 历史语义，不破坏既有数据。
   Future<void> migrateToV6(Migrator m) async {
+    // 官方 v0.9.0：同次图片任务的有序候选结果。
+    if (!await _tableHasColumn('generation_tasks', 'image_outputs')) {
+      await m.addColumn(db.generationTasks, db.generationTasks.imageOutputs);
+    }
+    // 用户 P0-B B3：远程授权审计持久化表。
     if (!await _tableExists('remote_authorization_audit')) {
       await m.createTable(db.remoteAuthorizationAudit);
     }
