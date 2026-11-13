@@ -25,11 +25,19 @@ enum ImageProtocol {
   codex_image,
   gemini_image,
   purefox_media,
+  minimax_image,
 }
 
 /// 只有对应协议才读取的渠道选项，每个协议一种类型。
 sealed class ImageProtocolOptions {
   const ImageProtocolOptions();
+}
+
+enum MidjourneyProtocol { proxy, images, atlascloud }
+
+class MidjourneyImageOptions extends ImageProtocolOptions {
+  const MidjourneyImageOptions(this.protocol);
+  final MidjourneyProtocol protocol;
 }
 
 class AgnesImageOptions extends ImageProtocolOptions {
@@ -102,11 +110,28 @@ final imageChannelModels = <ImageProtocol, Map<String, ImageChannelModel>>{
       id: ImageChannelModel(catalogId: id),
   },
   ImageProtocol.new_api_images: {
+    'mj_imagine': ImageChannelModel(
+      catalogId: 'midjourney',
+      protocolOptions: MidjourneyImageOptions(MidjourneyProtocol.proxy),
+    ),
+    for (final id in [
+      'midjourney-v8.2',
+      'midjourney-v8.2-fast',
+      'midjourney-v8.2-turbo',
+    ])
+      id: ImageChannelModel(
+        catalogId: 'midjourney-v8.2',
+        protocolOptions: MidjourneyImageOptions(MidjourneyProtocol.images),
+      ),
     ..._pixelSizeChannels,
     for (final id in imageModelsCatalog.keys.where(
       (id) => id.startsWith('gemini-'),
     ))
       id: ImageChannelModel(catalogId: id, includedInPresets: false),
+    'doubao-seedream-5-5': ImageChannelModel(
+      catalogId: 'seedream-5.5',
+      includedInPresets: false,
+    ),
     'doubao-seedream-5-0-pro': ImageChannelModel(
       catalogId: 'seedream-5.0-pro',
       includedInPresets: false,
@@ -116,6 +141,11 @@ final imageChannelModels = <ImageProtocol, Map<String, ImageChannelModel>>{
   ImageProtocol.codex_image: _pixelSizeChannels,
   ImageProtocol.gemini_image: _geminiChannels,
   ImageProtocol.purefox_media: purefoxMediaImageModels,
+  // https://platform.minimax.io/docs/api-reference/image-generation-h3-generations
+  ImageProtocol.minimax_image: {
+    for (final id in ['MiniMax-H3-Image', 'MiniMax-H3-Image-Highspeed'])
+      id: ImageChannelModel(catalogId: id),
+  },
 };
 
 /// PureFox 媒体网关的图片型号目录：不预置，填 key 后按站点 `/v1/models`
@@ -125,6 +155,25 @@ final purefoxMediaImageModels = <String, ImageChannelModel>{};
 const _listedImageChannels = <ImageProtocol, Map<String, ImageChannelModel>>{
   // https://www.atlascloud.ai/docs/openapi-index
   ImageProtocol.atlascloud_image: {
+    'youchuan/v8.2/text-to-image': ImageChannelModel(
+      catalogId: 'midjourney-v8.2',
+      capabilities: ImageModelCapabilities(
+        resolutions: {'auto', '2K'},
+        ratios: {
+          'auto',
+          '1:1',
+          '16:9',
+          '9:16',
+          '4:3',
+          '3:4',
+          '3:2',
+          '2:3',
+          '21:9',
+          '9:21',
+        },
+      ),
+      protocolOptions: MidjourneyImageOptions(MidjourneyProtocol.atlascloud),
+    ),
     // https://static.atlascloud.ai/model/schema/openai-gpt-image-2.6-sunburst-text-to-image.json
     'openai/gpt-image-2.6-sunburst/text-to-image': ImageChannelModel(
       catalogId: 'gpt-image-2.6-sunburst',
@@ -301,6 +350,7 @@ const _listedImageChannels = <ImageProtocol, Map<String, ImageChannelModel>>{
     'wan2.7-image-pro': ImageChannelModel(catalogId: 'wan2.7-image-pro'),
   },
   ImageProtocol.ark_image: {
+    'doubao-seedream-5-5-261028': ImageChannelModel(catalogId: 'seedream-5.5'),
     'doubao-seedream-5-0-pro-260628': ImageChannelModel(
       catalogId: 'seedream-5.0-pro',
     ),
