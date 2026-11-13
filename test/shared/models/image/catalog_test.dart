@@ -258,6 +258,20 @@ void main() {
       'qwen-image-2.0-pro',
     );
     expect(lookupImageModel('qwen-image-unknown'), isNull);
+    expect(recognizeImageModel('doubao-seedream-5-5-261028'), 'seedream-5.5');
+    final seedream55 = lookupImageChannelModel(
+      'volcengine',
+      'doubao-seedream-5-5-261028',
+    )!;
+    expect(seedream55.catalogId, 'seedream-5.5');
+    expect(seedream55.capabilities.resolutions, {'1K', '1.5K', '2K'});
+    expect(seedream55.capabilities.maxReferences, 10);
+    expect(seedream55.requestDefaults.outputFormat, 'png');
+    expect(seedream55.requestDefaults.promptOptimization, 'standard');
+    expect(
+      imageModelsForProvider('doubao').first,
+      'doubao-seedream-5-5-261028',
+    );
   });
 
   for (final protocol in imageChannelModels.entries) {
@@ -353,26 +367,23 @@ void main() {
     imageModels: imageModelsForProvider('agnes'),
     videoModels: ['agnes-video-2.5-flash'],
   );
-  test(
-    'Agnes is an independent image/video provider with an editable endpoint',
-    () {
-      expect(customAiProviderTypes, contains(AiProviderType.agnes));
-      expect(provider.supportedModelKinds, {
-        AiModelKind.image,
-        AiModelKind.video,
-      });
-      expect(provider.effectiveBaseUrl, agnesDefaultBaseUrl);
-      expect(provider.hasFixedBaseUrl, false);
-      expect(
-        provider.copyWith(baseUrl: 'https://proxy.test/v1').effectiveBaseUrl,
-        'https://proxy.test/v1',
-      );
-      expect(provider.availableModels, isEmpty);
-      expect(provider.availableAudioModels, isEmpty);
-      expect(provider.availableVideoModels, ['agnes-video-2.5-flash']);
-      expect(provider.isValid, true);
-    },
-  );
+  test('Agnes is a preset image/video provider with its official endpoint', () {
+    expect(customAiProviderTypes, contains(AiProviderType.agnes));
+    expect(provider.supportedModelKinds, {
+      AiModelKind.image,
+      AiModelKind.video,
+    });
+    expect(provider.effectiveBaseUrl, agnesDefaultBaseUrl);
+    expect(provider.hasFixedBaseUrl, true);
+    expect(
+      provider.copyWith(baseUrl: 'https://proxy.test/v1').effectiveBaseUrl,
+      agnesDefaultBaseUrl,
+    );
+    expect(provider.availableModels, isEmpty);
+    expect(provider.availableAudioModels, isEmpty);
+    expect(provider.availableVideoModels, ['agnes-video-2.5-flash']);
+    expect(provider.isValid, true);
+  });
 
   for (final model in imageModelsForProvider('agnes')) {
     test('$model production sizes round trip to documented API parameters', () {
