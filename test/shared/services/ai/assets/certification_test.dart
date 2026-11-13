@@ -28,11 +28,15 @@ import 'package:reveric/shared/services/credentials/master_key_store.dart';
 class _References implements ReferenceStorageService {
   final ensured = <String>[];
   @override
-  Future<VideoReference> ensure(VideoInput input, File file) async {
+  Future<VideoReference> ensure(
+    VideoInput input,
+    File file, {
+    AiProvider? provider,
+  }) async {
     ensured.add(input.assetId);
     return VideoReference(
       role: input.role,
-      url: Uri.parse('https://cos.example/${input.assetId}.png'),
+      url: 'https://cos.example/${input.assetId}.png',
       mimeType: input.mimeType,
       fileSize: await file.length(),
       mediaInfo: const VideoMediaInfo(width: 900, height: 1600),
