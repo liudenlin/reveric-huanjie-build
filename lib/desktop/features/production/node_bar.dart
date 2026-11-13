@@ -14,6 +14,7 @@
 
 import 'package:drift/drift.dart' show BooleanExpressionOperators;
 import 'dart:io';
+import 'text_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -44,6 +45,8 @@ import 'view/panorama_actions.dart';
 import 'inline_media.dart';
 import 'trim_dialog.dart';
 import 'depth_dialog.dart';
+import 'editing_node.dart' show previewProductionEditing;
+import '../editing/canvas_shell.dart' show CanvasEditingScope;
 import 'image_history.dart';
 import 'audio_history.dart';
 import 'node_card.dart' show ProductionSegmentTag;
@@ -373,6 +376,7 @@ class ProductionNodeBar extends HookConsumerWidget {
     );
 
     final image = node.type == canvasNodeTypeImage;
+    final openEditing = CanvasEditingScope.maybeOf(context)?.open;
     final adopted = clip?.adoptedAssetId;
     void upload() => productionRun(
       context,
@@ -513,11 +517,17 @@ class ProductionNodeBar extends HookConsumerWidget {
                                 onAdopted: close,
                               ),
                       ),
-                      // 视频、音频的采用结果在卡片里就地播放，只有图片需要弹窗看大图。
-                      if (image)
+                      // 图片查看大图，视频在弹窗播放；音频保留卡片内播放。
+                      if (image || node.type == canvasNodeTypeVideo)
                         _BarButton(
-                          icon: RevericIcons.visibility_outlined,
-                          label: context.t(LocaleKeys.commonView),
+                          icon: image
+                              ? RevericIcons.visibility_outlined
+                              : RevericIcons.play_arrow,
+                          label: context.t(
+                            image
+                                ? LocaleKeys.commonView
+                                : LocaleKeys.commonPlay,
+                          ),
                           onTap: onPreview,
                         ),
                       if (clip?.characterId != null)
@@ -552,16 +562,50 @@ class ProductionNodeBar extends HookConsumerWidget {
                         context.t(LocaleKeys.productionOpenDirector),
                         () => onOpenDirector(node),
                       )
-                    else if (!video &&
-                        sourceAsset?.type != 'video' &&
-                        sourceAsset?.type != 'audio')
-                      // 视频、音频素材在卡片里就地播放，不再弹窗打开。
+                    else if (node.type == canvasNodeTypeText)
+                      // 文本没有媒体可播，「查看」在弹窗里放大正文。
+                      button(
+                        RevericIcons.visibility_outlined,
+                        context.t(LocaleKeys.commonView),
+                        node.content.trim().isEmpty
+                            ? null
+                            : () => showProductionTextView(context, node),
+                      )
+                    else if (node.type == canvasNodeTypeEditing) ...[
+                      // 剪辑节点没有现成文件：打开进剪辑工程，预览先渲染再弹窗播放。
+                      button(
+                        RevericIcons.arrow_square_out,
+                        context.t(LocaleKeys.commonOpen),
+                        openEditing == null || node.editingId == null
+                            ? null
+                            : () => productionRun(
+                                context,
+                                () => openEditing(node.id),
+                              ),
+                      ),
+                      button(
+                        RevericIcons.play_arrow,
+                        context.t(LocaleKeys.productionPreviewAdopted),
+                        node.editingId == null
+                            ? null
+                            : () => productionRun(
+                                context,
+                                () => previewProductionEditing(
+                                  context,
+                                  service,
+                                  node,
+                                ),
+                              ),
+                      ),
+                    ] else if (!video && sourceAsset?.type != 'audio')
                       button(
                         RevericIcons.play_arrow,
                         context.t(
                           node.mediaAssetId == null
                               ? LocaleKeys.productionPreviewAdopted
-                              : LocaleKeys.commonOpen,
+                              : sourceAsset?.type == 'video'
+                              ? LocaleKeys.commonPlay
+                              : LocaleKeys.commonView,
                         ),
                         onPreview,
                       ),
