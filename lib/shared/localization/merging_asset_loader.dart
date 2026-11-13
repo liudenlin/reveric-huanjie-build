@@ -52,6 +52,7 @@ class MergingAssetLoader extends AssetLoader {
     'name_assistant',
     'onboarding',
     'plugin',
+    'provider',
     'relation',
     'relation_dialog',
     'reading',
@@ -64,6 +65,7 @@ class MergingAssetLoader extends AssetLoader {
     'subagent',
     'theater',
     'todo',
+    'tool',
     'workspace',
   ];
 
