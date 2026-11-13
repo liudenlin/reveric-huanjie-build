@@ -36,6 +36,14 @@ List<AppInitializationTask> defaultAppInitializationTasks() {
       run: seedDefaultCollections,
     ),
     AppInitializationTask(
+      id: 'remove_unscoped_collections_v1',
+      run: removeUnscopedCollections,
+    ),
+    AppInitializationTask(
+      id: 'kind_status_collections_v1',
+      run: seedKindStatusCollections,
+    ),
+    AppInitializationTask(
       id: 'default_third_party_providers_v1',
       run: seedDefaultThirdPartyProviders,
     ),
@@ -46,6 +54,10 @@ List<AppInitializationTask> defaultAppInitializationTasks() {
     AppInitializationTask(
       id: 'default_api88_provider_v1',
       run: seedDefaultApi88Provider,
+    ),
+    AppInitializationTask(
+      id: 'default_apikey_provider_v1',
+      run: seedDefaultApikeyProvider,
     ),
     AppInitializationTask(
       id: 'default_global_agents_v1',
