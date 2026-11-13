@@ -24,12 +24,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:flutter_mobx/flutter_mobx.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:mobx/mobx.dart' show Computed;
+import 'package:mobx/mobx.dart' show Computed, ObservableMap, runInAction;
 import 'package:reveric/third/flow/vyuh_node_flow/lib/src/editor/element_scope.dart';
 import 'package:reveric/third/flow/vyuh_node_flow/lib/src/editor/drag_session.dart';
 // layer_provider / unbounded_widgets 未在库 barrel 导出，直接引 src(与 canvas_ai_focus_layer.dart 同一先例)。
 import 'package:reveric/third/flow/vyuh_node_flow/lib/src/editor/unbounded_widgets.dart';
 import 'package:reveric/third/flow/vyuh_node_flow/lib/src/plugins/layer_provider.dart';
+import '../../../shared/components/dotted_border_box.dart';
 import '../../../shared/database/novel_content_database.dart';
 import '../../../shared/localization/app_localization.dart';
 import '../../../shared/localization/locale_keys.dart';
@@ -58,10 +59,12 @@ import 'grid/outlet.dart';
 import 'grid/group_titles.dart';
 import 'grid/session.dart';
 import 'node_card.dart';
+import 'node_title.dart';
 import 'selection_layer.dart';
 import 'selection_actions.dart';
 import 'view/region.dart';
 import 'support.dart';
+import 'history_region.dart';
 import 'task_status.dart' show ProductionTaskActions;
 
 const double _minZoom = .15;
@@ -107,6 +110,7 @@ class ProductionBoard extends HookConsumerWidget {
     required this.segments,
     required this.segmentLabels,
     required this.sceneLabels,
+    this.onAddSegment,
     required this.onSelect,
     this.onContextMenu,
     required this.onClear,
@@ -123,6 +127,7 @@ class ProductionBoard extends HookConsumerWidget {
     this.tools,
     this.topInset = 0,
     this.controls = const [],
+    this.empty,
     this.taskActions,
   });
   final ProductionCanvasService service;
@@ -138,8 +143,11 @@ class ProductionBoard extends HookConsumerWidget {
   /// 片段 id → 「段 x-y」。
   final Map<String, String> segmentLabels;
 
-  /// 场次 id → 色带标题。
+  /// 场次 id → 色带标题；按场次顺序，包含还没有片段的场次。
   final Map<String, String> sceneLabels;
+
+  /// 场次色带底部的「分镜」：在这一场末尾新建片段。为 null 时不显示。
+  final ValueChanged<String>? onAddSegment;
   final ValueChanged<CanvasNode> onSelect;
 
   /// 节点右键：节点已选中，[at] 是全局坐标。
@@ -160,6 +168,7 @@ class ProductionBoard extends HookConsumerWidget {
   /// 导演台节点卡片上的「打开导演台」。
   final ValueChanged<CanvasNode> onOpenDirector;
   final ProductionBoardCamera camera;
+  final Widget? empty;
 
   /// 贴在选中节点上沿的工具条。
   final Widget? bar;
@@ -187,6 +196,7 @@ class ProductionBoard extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final history = ProductionHistoryScope.maybeOf(context)?.history;
     final colors = RevericTheme.colorsOf(context);
     final typo = RevericTheme.typographyOf(context);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
@@ -237,6 +247,8 @@ class ProductionBoard extends HookConsumerWidget {
       [bands],
     );
     useEffect(() => controller.dispose, [controller]);
+    final textTitle = useMemoized(ProductionNodeTitle.new);
+    useEffect(() => textTitle.dispose, [textTitle]);
     // 平移也会换掉 viewport 值；标题只跟放大倍数走，倍数不变时不让每张卡片的标题重建。
     final headerScale = useMemoized(
       () => Computed(
@@ -251,7 +263,16 @@ class ProductionBoard extends HookConsumerWidget {
       [controller],
     );
 
-    final nodes = content.data?.nodes ?? const <CanvasNode>[];
+    // 场次节点不进 flow：色带图层负责绘制与拖动，已删除场次的场次节点不显示。
+    final allNodes = content.data?.nodes ?? const <CanvasNode>[];
+    final nodes = [
+      for (final n in allNodes)
+        if (n.type != canvasNodeTypeScene) n,
+    ];
+    final sceneNodes = [
+      for (final n in allNodes)
+        if (sceneLabels.containsKey(n.sceneId)) n,
+    ];
     final edges = content.data?.edges ?? const <ProductionConnection>[];
     final byId = {for (final n in nodes) n.id: n};
     final membersByParent = <String, List<CanvasNode>>{};
@@ -277,6 +298,7 @@ class ProductionBoard extends HookConsumerWidget {
                     aspect: productionAspect(r.ratio),
                     modelId: r.modelId,
                     providerId: r.providerId,
+                    adoptedAssetId: r.adoptedAssetId,
                   ),
               },
             ),
@@ -316,25 +338,45 @@ class ProductionBoard extends HookConsumerWidget {
       );
     }
 
-    controller.resolvePlugin<ProductionGroupTitles>()!.labels = {
-      for (final (index, group)
-          in nodes.where((n) => n.type == canvasNodeTypeGroup).indexed)
-        group.id:
-            ProductionGroupLayout.fromStyle(group.style)
-                is StoryboardGroupLayout
-            ? context.t(
-                LocaleKeys.productionGroupCount,
-                namedArgs: {
-                  'title': group.title.isEmpty
-                      ? context.t(LocaleKeys.productionGroupStoryboard)
-                      : group.title,
-                  'count': '${membersByParent[group.id]?.length ?? 0}',
-                },
-              )
-            : group.title.isEmpty
-            ? '${context.t(LocaleKeys.productionGroupFree)} ${index + 1}'
-            : group.title,
-    };
+    // 点未选中节点的标题：先由画布完成选中（可能被未保存的编辑拦下），选中落定后再进入标题编辑。
+    final titleRequest = useRef<({String id, DateTime at})?>(null);
+    useEffect(() {
+      final request = titleRequest.value;
+      titleRequest.value = null;
+      if (request == null ||
+          request.id != selected ||
+          DateTime.now().difference(request.at) > const Duration(seconds: 1)) {
+        return null;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) {
+          textTitle.starters[request.id]?.call();
+        }
+      });
+      return null;
+    }, [selected]);
+    controller.resolvePlugin<ProductionGroupTitles>()!
+      ..headerScale = (() => headerScale.value)
+      ..onTitleTap = ((id) => titleRequest.value = (id: id, at: DateTime.now()))
+      ..labels = {
+        for (final (index, group)
+            in nodes.where((n) => n.type == canvasNodeTypeGroup).indexed)
+          group.id:
+              ProductionGroupLayout.fromStyle(group.style)
+                  is StoryboardGroupLayout
+              ? context.t(
+                  LocaleKeys.productionGroupCount,
+                  namedArgs: {
+                    'title': group.title.isEmpty
+                        ? context.t(LocaleKeys.productionGroupStoryboard)
+                        : group.title,
+                    'count': '${membersByParent[group.id]?.length ?? 0}',
+                  },
+                )
+              : group.title.isEmpty
+              ? '${context.t(LocaleKeys.productionGroupFree)} ${index + 1}'
+              : group.title,
+      };
 
     final sizeKey = nodes
         .map((n) {
@@ -342,11 +384,25 @@ class ProductionBoard extends HookConsumerWidget {
           return '${size.width}x${size.height}';
         })
         .join('|');
+    final sceneKey = sceneNodes.map((n) => n.id).join('|');
     final scenePositions = useMemoized(
-      () => productionScenePositions(nodes, segments, sizeOf),
-      [content.data, segments, sizeKey],
+      () =>
+          productionScenePositions([...nodes, ...sceneNodes], segments, sizeOf),
+      [content.data, segments, sizeKey, sceneKey],
     );
     final latestScenePositions = useRef(scenePositions)..value = scenePositions;
+    // 画布打开期间新加的场次：补上场次节点，色带随 stream 出现。
+    final anchoredScenes = {for (final n in allNodes) ?n.sceneId};
+    final missingScenes = [
+      for (final id in sceneLabels.keys)
+        if (!anchoredScenes.contains(id)) id,
+    ].join('|');
+    useEffect(() {
+      if (content.hasData && missingScenes.isNotEmpty) {
+        productionRun(context, () => service.ensureSceneNodes(canvasId));
+      }
+      return null;
+    }, [content.hasData, missingScenes]);
     // nodeBuilder / 事件回调里按 id 取最新快照，不随 stream 重建回调。
     final latest = useRef(byId)..value = byId;
     // 选中、拖动开始和 z 序变化都会让 flow 对每个节点重跑 nodeBuilder；
@@ -389,6 +445,12 @@ class ProductionBoard extends HookConsumerWidget {
                   is StoryboardGroupLayout)
             node.id: parent.id,
     };
+    controller.resolvePlugin<ProductionGroupTitles>()!.titled = {
+      for (final node in nodes)
+        if (node.type != canvasNodeTypeGroup &&
+            !interaction.storyboardParents.containsKey(node.id))
+          node.id,
+    };
     final edgeIds = {for (final e in edges) e.id};
     // 导演台导出结果：有 staging_output 入边的素材节点。
     final outputIds = {
@@ -407,6 +469,7 @@ class ProductionBoard extends HookConsumerWidget {
     final latestAudioProviderTypes = useRef(audioProviderTypes)
       ..value = audioProviderTypes;
     final latestAssetTypes = useRef(assetTypes)..value = assetTypes;
+    final previewing = useRef(false);
     // 点节点选中时不移动镜头；只有从外部（列表、第二栏）选中才定位。
     final tapped = useRef<String?>(null);
     final fitted = useRef(false);
@@ -420,6 +483,34 @@ class ProductionBoard extends HookConsumerWidget {
           node.id: node.parentId!,
     };
 
+    // 落点与整理用的布局：flow 里此刻的节点，加上各场的场次节点。有片段的场次节点
+    // 跟着片段走（片段最左、最上的位置），空场次取色带当前的位置；场次节点随所在场次一起移动。
+    ({Map<String, Rect> rects, Map<String, String> sceneOf}) layout() {
+      final rects = {
+        for (final node in controller.nodes.values)
+          node.id: node.position.value & node.size.value,
+      };
+      final sceneOf = {...interaction.sceneForNode};
+      for (final MapEntry(key: sceneId, value: anchor)
+          in bands.anchors.entries) {
+        final members = [
+          for (final entry in interaction.sceneForNode.entries)
+            if (entry.value == sceneId) ?rects[entry.key],
+        ];
+        rects[anchor.id] = members.isEmpty
+            ? productionSceneAnchorRect(bands.anchorAt(sceneId), empty: true)
+            : productionSceneAnchorRect(
+                Offset(
+                  members.map((r) => r.left).reduce(math.min),
+                  members.map((r) => r.top).reduce(math.min),
+                ),
+                empty: false,
+              );
+        sceneOf[anchor.id] = sceneId;
+      }
+      return (rects: rects, sceneOf: sceneOf);
+    }
+
     camera._center = () {
       final bounds = controller.visibleGraphBounds;
       return bounds.isEmpty ? null : bounds.center;
@@ -430,15 +521,13 @@ class ProductionBoard extends HookConsumerWidget {
       if (source == null) {
         return null;
       }
+      final (:rects, :sceneOf) = layout();
       return productionDerivedPlacement(
         sourceId: sourceId,
         size: size ?? (audio ? productionAudioNodeSize : source.size.value),
-        nodes: {
-          for (final node in controller.nodes.values)
-            node.id: node.position.value & node.size.value,
-        },
+        nodes: rects,
         groupOf: groupOf(),
-        sceneOf: interaction.sceneForNode,
+        sceneOf: sceneOf,
         siblings: [
           for (final edge in latestEdges.value)
             if (edge.type == canvasEdgeTypeDerivedOutput &&
@@ -476,6 +565,7 @@ class ProductionBoard extends HookConsumerWidget {
                 locked: interaction.storyboardParents.containsKey(node.id),
                 derived:
                     outputIds.contains(node.id) || derivedIds.contains(node.id),
+                headerScale: () => headerScale.value,
               )
               ..position.value = position
               ..selected.value = existing?.selected.value ?? false
@@ -537,12 +627,14 @@ class ProductionBoard extends HookConsumerWidget {
     final connectionLabels = {
       for (final edge in edges)
         if (edge.role case final role?)
-          edge.id: productionRole(
-            context,
-            VideoInputRole.values.byName(role),
-            mode: clipInfo?[byId[edge.targetNodeId]?.clipId]?.mode,
-            middleFrameIndex: edge.middleFrameIndex,
-          ),
+          edge.id: role == 'prompt'
+              ? context.t(LocaleKeys.productionText)
+              : productionRole(
+                  context,
+                  VideoInputRole.values.byName(role),
+                  mode: clipInfo?[byId[edge.targetNodeId]?.clipId]?.mode,
+                  middleFrameIndex: edge.middleFrameIndex,
+                ),
     };
     useEffect(
       () {
@@ -587,26 +679,27 @@ class ProductionBoard extends HookConsumerWidget {
     // 按 flow 里此刻的位置排；多选时只整理选区。先挪 flow 再走拖动同一条保存路径，失败时回退。
     void tidy() {
       final scope = controller.selectedNodeIds.toSet();
+      final (:rects, :sceneOf) = layout();
       final positions = productionTidyLayout(
-        nodes: {
-          for (final node in controller.nodes.values)
-            node.id: node.position.value & node.size.value,
-        },
-        sceneOf: interaction.sceneForNode,
+        nodes: rects,
+        sceneOf: sceneOf,
         groupOf: groupOf(),
         edges: [
           for (final edge in latestEdges.value)
             (edge.sourceNodeId, edge.targetNodeId),
         ],
-        sceneOrder: [for (final segment in bands.segments) ?segment.sceneId],
+        sceneOrder: [...bands.sceneLabels.keys],
         scope: scope,
       );
       if (positions.isEmpty) {
         return;
       }
       for (final entry in positions.entries) {
-        controller.setNodePosition(entry.key, entry.value);
+        if (controller.getNode(entry.key) != null) {
+          controller.setNodePosition(entry.key, entry.value);
+        }
       }
+      bands.place(positions);
       bands.onMove?.call(positions);
       fitAll();
     }
@@ -671,6 +764,32 @@ class ProductionBoard extends HookConsumerWidget {
       () => flow.NodeFlowEvents<String, String>(
         onSelectionChange: (_) => interaction.selectionChanged(),
         node: flow.NodeEvents<String>(
+          onDoubleTap: (node) {
+            final row = latest.value[node.id];
+            if (row == null) {
+              return;
+            }
+            final clip = latestModes.value?[row.clipId];
+            final assetId = row.isGenerationNode
+                ? clip?.adoptedAssetId
+                : row.mediaAssetId;
+            final type = row.isGenerationNode
+                ? row.type
+                : latestAssetTypes.value[assetId];
+            if (assetId == null ||
+                (type != 'image' && type != 'video') ||
+                previewing.value) {
+              return;
+            }
+            previewing.value = true;
+            productionRun(context, () async {
+              try {
+                await previewProductionAsset(context, service, assetId);
+              } finally {
+                previewing.value = false;
+              }
+            });
+          },
           onTap: (node) {
             final row = latest.value[node.id];
             if (row != null &&
@@ -737,7 +856,8 @@ class ProductionBoard extends HookConsumerWidget {
               for (final edge in controller.connections)
                 if (edge.targetNodeId == target?.id &&
                     edge.sourceNodeId != source?.id)
-                  if (latest.value[edge.sourceNodeId] case final existing?)
+                  if (latest.value[edge.sourceNodeId] case final existing?
+                      when existing.type != canvasNodeTypeText)
                     existing.isGenerationNode
                         ? existing.type
                         : latestAssetTypes.value[existing.mediaAssetId] ?? '',
@@ -763,7 +883,8 @@ class ProductionBoard extends HookConsumerWidget {
                 context.targetPort.id == _portIn &&
                 target?.isGenerationNode == true &&
                 mode != null &&
-                (audioAllowed ||
+                (source?.type == canvasNodeTypeText ||
+                    audioAllowed ||
                     (target?.type == canvasNodeTypeImage
                             ? const [VideoInputRole.reference_image]
                             : target?.type == canvasNodeTypeAudio
@@ -813,26 +934,63 @@ class ProductionBoard extends HookConsumerWidget {
       ..nodeForClip = {
         for (final n in nodes)
           if (n.clipId != null) n.clipId!: n.id,
-      };
-    bands.onMove = (positions) => productionRun(context, () async {
+      }
+      ..onAdd = onAddSegment
+      ..sync({
+        for (final n in sceneNodes)
+          n.sceneId!: (
+            id: n.id,
+            at: scenePositions[n.id] ?? Offset(n.x, n.y),
+            stored: Offset(n.x, n.y),
+          ),
+      });
+    bands.onMove = (moved) => productionRun(context, () async {
+      // 场次节点是场次位置的真源：片段整场移动时，场次节点一起移到片段最左、最上的位置，
+      // 并进入同一条撤销记录。
+      final positions = {...moved};
+      for (final MapEntry(key: sceneId, value: anchor)
+          in bands.anchors.entries) {
+        final members = [
+          for (final entry in interaction.sceneForNode.entries)
+            if (entry.value == sceneId) ?positions[entry.key],
+        ];
+        if (members.isNotEmpty && !positions.containsKey(anchor.id)) {
+          positions[anchor.id] = Offset(
+            members.map((at) => at.dx).reduce(math.min),
+            members.map((at) => at.dy).reduce(math.min),
+          );
+        }
+      }
       try {
-        await service.write(canvasId, () async {
-          await service.moveNodes(canvasId, {
-            for (final entry in positions.entries)
-              entry.key: (x: entry.value.dx, y: entry.value.dy),
-          });
-          for (final group
-              in controller.nodes.values.whereType<ProductionFlowGroup>()) {
-            if (group.layout is FreeGroupLayout &&
-                (positions.containsKey(group.id) ||
-                    group.nodeIds.any(positions.containsKey))) {
-              await service.groups.resizeFree(
+        await recordProductionChange(
+          context,
+          {
+            ...positions.keys,
+            for (final group
+                in controller.nodes.values.whereType<ProductionFlowGroup>())
+              if (group.layout is FreeGroupLayout &&
+                  (positions.containsKey(group.id) ||
+                      group.nodeIds.any(positions.containsKey)))
                 group.id,
-                group.constrain(group.position.value & group.size.value),
-              );
+          },
+          () => service.write(canvasId, () async {
+            await service.moveNodes(canvasId, {
+              for (final entry in positions.entries)
+                entry.key: (x: entry.value.dx, y: entry.value.dy),
+            });
+            for (final group
+                in controller.nodes.values.whereType<ProductionFlowGroup>()) {
+              if (group.layout is FreeGroupLayout &&
+                  (positions.containsKey(group.id) ||
+                      group.nodeIds.any(positions.containsKey))) {
+                await service.groups.resizeFree(
+                  group.id,
+                  group.constrain(group.position.value & group.size.value),
+                );
+              }
             }
-          }
-        });
+          }),
+        );
       } catch (_) {
         for (final id in positions.keys) {
           final row = latest.value[id];
@@ -843,6 +1001,7 @@ class ProductionBoard extends HookConsumerWidget {
             );
           }
         }
+        bands.forget(positions.keys);
         rethrow;
       }
     });
@@ -897,11 +1056,15 @@ class ProductionBoard extends HookConsumerWidget {
                                 row.id,
                                 slot,
                                 asset.id,
+                                history: history,
                               );
                             }
                           }),
-                          onResize: (frame) =>
-                              service.groups.resizeFree(row.id, frame),
+                          onResize: (frame) => service.groups.resizeFree(
+                            row.id,
+                            frame,
+                            history: history,
+                          ),
                         );
                       }
                       final parent = controller.getNode(row?.parentId ?? '');
@@ -953,6 +1116,7 @@ class ProductionBoard extends HookConsumerWidget {
                             onOpenDirector: () =>
                                 latestOnOpenDirector.value(row),
                             taskActions: cardTaskActions,
+                            textTitle: textTitle,
                           );
                           return parent is ProductionFlowGroup &&
                                   layout is StoryboardGroupLayout
@@ -971,15 +1135,16 @@ class ProductionBoard extends HookConsumerWidget {
                     },
                   ),
                 ),
-                if (nodes.isEmpty)
-                  Center(
-                    child: IgnorePointer(
-                      child: Text(
-                        context.t(LocaleKeys.productionEmpty),
-                        style: typo.ui.copyWith(color: colors.textMuted),
+                if (nodes.isEmpty && sceneNodes.isEmpty)
+                  empty ??
+                      Center(
+                        child: IgnorePointer(
+                          child: Text(
+                            context.t(LocaleKeys.productionEmpty),
+                            style: typo.ui.copyWith(color: colors.textMuted),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
                 Positioned.fill(
                   child: ProductionGroupOutlet(
                     controller: controller,
@@ -1002,6 +1167,29 @@ class ProductionBoard extends HookConsumerWidget {
                     trailingInset: composerTrailingInset,
                     bottomInset: composerBottomInset,
                     headerExtent: productionNodeHeaderExtent,
+                    // 文本节点的标题随正文一起编辑、一起保存；其余节点只改标题。
+                    title: switch (byId[selected]!.type) {
+                      canvasNodeTypeGroup => const SizedBox.shrink(),
+                      canvasNodeTypeText => ProductionNodeTitleField(
+                        key: ValueKey('title/$selected'),
+                        title: textTitle,
+                        nodeId: selected!,
+                      ),
+                      _ =>
+                        interaction.storyboardParents.containsKey(selected)
+                            ? const SizedBox.shrink()
+                            : ProductionNodeTitleField(
+                                key: ValueKey('title/$selected'),
+                                title: textTitle,
+                                nodeId: selected!,
+                                load: () => service.nodeTitle(selected!),
+                                commit: (text) => service.renameNode(
+                                  selected!,
+                                  text,
+                                  history: history,
+                                ),
+                              ),
+                    },
                     bar:
                         bar == null ||
                             interaction.storyboardParents.containsKey(selected)
@@ -1131,6 +1319,7 @@ flow.Node<String> _flowNode(
   required Size size,
   required bool derived,
   bool locked = false,
+  double Function()? headerScale,
 }) {
   final ports = productionNodePorts(node, derived: derived);
   // 常态端口透明，悬停 / 选中时由卡片画出提示点；拖线时可落的端口和端口自身悬停仍用强调色。
@@ -1182,6 +1371,16 @@ flow.Node<String> _flowNode(
       ports: nodePorts,
     );
   }
+  if (!locked && headerScale != null) {
+    return _TitledNode(
+      id: node.id,
+      type: node.type,
+      position: Offset(node.x, node.y),
+      size: size,
+      ports: nodePorts,
+      headerScale: headerScale,
+    );
+  }
   return flow.Node<String>(
     id: node.id,
     type: node.type,
@@ -1193,7 +1392,42 @@ flow.Node<String> _flowNode(
   );
 }
 
-/// 场次色带：一场的片段节点外框，左上角写场次。画在网格之上、连线之下，随节点拖动实时跟随。
+/// 卡片外上方画着标题的节点。标题也要进 flow 的空间命中范围：否则在标题上按下会被
+/// 画布当成点空白开始框选，拖标题时选区被清掉，只有这张卡片在动、同场其他片段留在原地。
+class _TitledNode extends flow.Node<String> {
+  _TitledNode({
+    required super.id,
+    required super.type,
+    required super.position,
+    required super.size,
+    required super.ports,
+    required this.headerScale,
+  }) : super(data: id);
+
+  /// 标题随画布缩放反向放大，见 [productionHeaderScale]。
+  final double Function() headerScale;
+
+  Rect _withHeader(double scale) {
+    final card = super.getBounds();
+    return Rect.fromLTRB(
+      card.left,
+      card.top - productionCardHeaderExtent * scale,
+      card.right,
+      card.bottom,
+    );
+  }
+
+  // 空间索引只在节点变动时取一次范围，按标题最大放大倍数算；具体命中按当前倍数判断。
+  @override
+  Rect getBounds() => _withHeader(productionHeaderScale(0.01));
+
+  @override
+  bool containsPoint(Offset point) =>
+      _withHeader(headerScale()).contains(point);
+}
+
+/// 场次色带：一场的片段节点外框，左上角写场次，底部是「分镜」入口。画在网格之上、连线之下，
+/// 随节点拖动实时跟随。空场次没有片段节点，色带由场次节点定位，拖动时只挪色带。
 class _BandLayer extends flow.NodeFlowPlugin implements LayerProvider {
   _BandLayer();
 
@@ -1203,8 +1437,51 @@ class _BandLayer extends flow.NodeFlowPlugin implements LayerProvider {
 
   /// 片段 id → 节点 id。
   Map<String, String> nodeForClip = const {};
+
+  /// 场次 id → 场次节点：[at] 是排位后的位置，[stored] 是库里的坐标。由 [sync] 更新。
+  Map<String, ({String id, Offset at, Offset stored})> anchors = const {};
+  ValueChanged<String>? onAdd;
   Future<void> Function(Map<String, Offset>)? onMove;
   bool _dragging = false;
+
+  /// 空场次拖动中、或已提交但库里还没写回的位置，按场次节点 id 存。
+  final _moved = ObservableMap<String, Offset>();
+  String? _draggingAnchor;
+
+  void sync(Map<String, ({String id, Offset at, Offset stored})> next) {
+    anchors = next;
+    final stale = [
+      for (final MapEntry(key: id, value: at) in _moved.entries)
+        if (id != _draggingAnchor &&
+            !next.values.any((a) => a.id == id && a.stored != at))
+          id,
+    ];
+    if (stale.isNotEmpty) {
+      // 库里已写回（或场次已不在画布上）：交回排位结果。
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => runInAction(() => stale.forEach(_moved.remove)),
+      );
+    }
+  }
+
+  /// 空场次色带此刻的位置。
+  Offset anchorAt(String sceneId) {
+    final anchor = anchors[sceneId]!;
+    return _moved[anchor.id] ?? anchor.at;
+  }
+
+  /// 整理画布后先把空场次挪到新位置，不等库写回。
+  void place(Map<String, Offset> positions) => runInAction(() {
+    for (final anchor in anchors.values) {
+      if (positions[anchor.id] case final at?) {
+        _moved[anchor.id] = at;
+      }
+    }
+  });
+
+  /// 保存失败时放弃这些场次节点的本地位置。
+  void forget(Iterable<String> ids) =>
+      runInAction(() => ids.forEach(_moved.remove));
 
   void startDrag(String sceneId) {
     final controller = _controller!;
@@ -1219,6 +1496,11 @@ class _BandLayer extends flow.NodeFlowPlugin implements LayerProvider {
           if (controller.getNode(id) != null) id,
     ];
     if (members.isEmpty) {
+      final anchor = anchors[sceneId];
+      if (anchor != null) {
+        _draggingAnchor = anchor.id;
+        runInAction(() => _moved[anchor.id] = anchorAt(sceneId));
+      }
       return;
     }
     controller.interaction.finishSelection();
@@ -1234,12 +1516,25 @@ class _BandLayer extends flow.NodeFlowPlugin implements LayerProvider {
   }
 
   void drag(Offset delta) {
+    if (_draggingAnchor case final id?) {
+      runInAction(() => _moved[id] = _moved[id]! + delta);
+      return;
+    }
     if (_dragging) {
       _controller!.moveNodeDrag(delta);
     }
   }
 
   void endDrag({bool cancel = false}) {
+    if (_draggingAnchor case final id?) {
+      _draggingAnchor = null;
+      if (cancel) {
+        forget([id]);
+      } else {
+        onMove?.call({id: _moved[id]!});
+      }
+      return;
+    }
     final controller = _controller;
     if (controller == null || !_dragging) {
       return;
@@ -1286,6 +1581,7 @@ class _BandLayer extends flow.NodeFlowPlugin implements LayerProvider {
     final scenes = <String>{
       for (final s in segments)
         if (s.sceneId != null) s.sceneId!,
+      ...anchors.keys,
     };
     for (final sceneId in scenes) {
       Rect? rect;
@@ -1296,6 +1592,9 @@ class _BandLayer extends flow.NodeFlowPlugin implements LayerProvider {
           final r = node.position.value & node.size.value;
           rect = rect == null ? r : rect.expandToInclude(r);
         }
+      }
+      if (rect == null && anchors.containsKey(sceneId)) {
+        rect = productionSceneAnchorRect(anchorAt(sceneId), empty: true);
       }
       if (rect != null) {
         result.add((sceneId: sceneId, rect: productionSceneBand(rect)));
@@ -1324,6 +1623,7 @@ class _BandLayer extends flow.NodeFlowPlugin implements LayerProvider {
     if (_controller == null) {
       return null;
     }
+    final add = onAdd;
     return UnboundedPositioned.fill(
       child: Observer(
         builder: (_) => UnboundedStack(
@@ -1336,18 +1636,33 @@ class _BandLayer extends flow.NodeFlowPlugin implements LayerProvider {
                 top: band.rect.top,
                 width: band.rect.width,
                 height: band.rect.height,
-                child: ElementScope(
-                  createSession: () =>
-                      _controller!.createSession(DragSessionType.nodeDrag),
-                  cursor: SystemMouseCursors.grab,
-                  onDragStart: (_) => startDrag(band.sceneId),
-                  onDragUpdate: (details) => drag(details.delta),
-                  onDragEnd: (_) => endDrag(),
-                  onDragCancel: () => endDrag(cancel: true),
-                  child: Tooltip(
-                    message: context.t(LocaleKeys.productionMoveScene),
-                    child: _Band(label: sceneLabels[band.sceneId] ?? ''),
-                  ),
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: ElementScope(
+                        createSession: () => _controller!.createSession(
+                          DragSessionType.nodeDrag,
+                        ),
+                        cursor: SystemMouseCursors.grab,
+                        onDragStart: (_) => startDrag(band.sceneId),
+                        onDragUpdate: (details) => drag(details.delta),
+                        onDragEnd: (_) => endDrag(),
+                        onDragCancel: () => endDrag(cancel: true),
+                        child: Tooltip(
+                          message: context.t(LocaleKeys.productionMoveScene),
+                          child: _Band(label: sceneLabels[band.sceneId] ?? ''),
+                        ),
+                      ),
+                    ),
+                    if (add != null)
+                      Positioned(
+                        left: _bandInset,
+                        right: _bandInset,
+                        bottom: RevericSpacing.lg,
+                        height: productionSceneAddHeight,
+                        child: _BandAdd(onTap: () => add(band.sceneId)),
+                      ),
+                  ],
                 ),
               ),
           ],
@@ -1356,6 +1671,9 @@ class _BandLayer extends flow.NodeFlowPlugin implements LayerProvider {
     );
   }
 }
+
+/// 色带左右比卡片多出的宽度，与 [productionSceneBand] 一致。
+const double _bandInset = 28;
 
 /// 场次色带外观。
 class _Band extends StatelessWidget {
@@ -1396,7 +1714,59 @@ class _Band extends StatelessWidget {
   }
 }
 
-enum _AnchorSlot { bar, composer }
+/// 色带底部的虚线入口：在这一场末尾新建片段。平时退在色带里，悬停时加深。
+class _BandAdd extends StatefulWidget {
+  const _BandAdd({required this.onTap});
+  final VoidCallback onTap;
+  @override
+  State<_BandAdd> createState() => _BandAddState();
+}
+
+class _BandAddState extends State<_BandAdd> {
+  bool _hovered = false;
+  @override
+  Widget build(BuildContext context) {
+    final colors = RevericTheme.colorsOf(context);
+    final typo = RevericTheme.typographyOf(context);
+    final foreground = _hovered ? colors.textSecondary : colors.textMuted;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: DottedBorderBox(
+          color: canvasGlassBorder(colors, strong: _hovered),
+          borderRadius: RevericRadius.canvasNode,
+          child: AnimatedContainer(
+            duration: CanvasMotion.hover,
+            curve: CanvasMotion.curve,
+            decoration: BoxDecoration(
+              color: _hovered
+                  ? canvasGlassFill(colors)
+                  : canvasGlassFill(colors).withValues(alpha: 0),
+              borderRadius: BorderRadius.circular(RevericRadius.canvasNode),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                RevericIcon(RevericIcons.add, size: 14, color: foreground),
+                const SizedBox(width: RevericSpacing.xs),
+                Text(
+                  context.t(LocaleKeys.productionAddSegment),
+                  style: typo.ui.copyWith(color: foreground),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _AnchorSlot { bar, composer, title }
 
 /// 按视口把工具条贴在节点上沿、输入框贴在下沿，并夹在视口内。
 /// 两者一起排版：输入框被视口底边顶上去时，工具条随之上移停在输入框上方，两者不重叠。
@@ -1405,6 +1775,7 @@ class _Anchored extends StatelessWidget {
     required this.controller,
     required this.nodeId,
     required this.composer,
+    required this.title,
     this.bar,
     this.topInset = 0,
     this.trailingInset = 0,
@@ -1415,6 +1786,9 @@ class _Anchored extends StatelessWidget {
   final String nodeId;
   final Widget? bar;
   final Widget composer;
+
+  /// 叠在节点标题原位的可输入标题（文本节点编辑时）；不可见时不占命中。
+  final Widget title;
   final double topInset;
   final double trailingInset;
   final double bottomInset;
@@ -1437,10 +1811,8 @@ class _Anchored extends StatelessWidget {
               .toScreen(flow.GraphPosition(node.position.value))
               .offset;
           // 标题按缩放反向放大过，工具条要让过放大后的高度。
-          final header =
-              headerExtent *
-              viewport.zoom *
-              productionHeaderScale(viewport.zoom);
+          final scale = viewport.zoom * productionHeaderScale(viewport.zoom);
+          final header = headerExtent * scale;
           return CustomMultiChildLayout(
             delegate: _AnchorLayout(
               Rect.fromLTRB(
@@ -1453,8 +1825,18 @@ class _Anchored extends StatelessWidget {
               topInset,
               trailingInset,
               bottomInset,
+              viewport.zoom,
             ),
             children: [
+              LayoutId(
+                id: _AnchorSlot.title,
+                // 与卡片标题同一套缩放：按未缩放尺寸排版，再整体放大到屏幕尺寸。
+                child: Transform.scale(
+                  scale: scale,
+                  alignment: Alignment.topLeft,
+                  child: title,
+                ),
+              ),
               if (bar != null) LayoutId(id: _AnchorSlot.bar, child: bar!),
               LayoutId(
                 id: _AnchorSlot.composer,
@@ -1476,7 +1858,9 @@ class _AnchorLayout extends MultiChildLayoutDelegate {
     this.topInset,
     this.trailingInset,
     this.bottomInset,
+    this.zoom,
   );
+  final double zoom;
   final Rect rect;
   final double header;
   final double topInset;
@@ -1489,6 +1873,25 @@ class _AnchorLayout extends MultiChildLayoutDelegate {
 
   @override
   void performLayout(Size size) {
+    // 标题落在卡片标题原位（含选中时的上浮），尺寸是缩放前的画布尺寸。
+    final scale = header / productionNodeHeaderExtent;
+    final inset = RevericSpacing.xxs * zoom;
+    layoutChild(
+      _AnchorSlot.title,
+      BoxConstraints.tight(
+        Size(
+          math.max(0, (rect.width - inset) / scale),
+          productionNodeHeaderExtent,
+        ),
+      ),
+    );
+    positionChild(
+      _AnchorSlot.title,
+      Offset(
+        rect.left + inset,
+        rect.top - header - productionNodeHeaderExtent * zoom * .16,
+      ),
+    );
     final top = topInset + _margin;
     final maxHeight = math.max(
       0.0,
@@ -1554,6 +1957,7 @@ class _AnchorLayout extends MultiChildLayoutDelegate {
   bool shouldRelayout(_AnchorLayout old) =>
       old.rect != rect ||
       old.header != header ||
+      old.zoom != zoom ||
       old.topInset != topInset ||
       old.trailingInset != trailingInset ||
       old.bottomInset != bottomInset;
