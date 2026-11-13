@@ -21,6 +21,7 @@
 //   .agents/rules/db-migration.md
 // ⚠️ 修改此文件后必须运行 `make codegen`，否则 .drift.dart / .g.dart 不会更新
 // ⚠️ 新增字段时需要同步更新：DB → service → AI tools（schema/read/write/create/edit） → tool card i18n（fieldLabel/translation）
+import 'dart:async';
 import 'dart:io';
 
 import 'package:drift/drift.dart';
@@ -343,10 +344,16 @@ const String canvasNodeTypeMedia = 'media';
 const String canvasNodeTypeStaging = 'staging';
 // 制作画布分组；成员用 parent_id 指向它，布局参数在 style.group。
 const String canvasNodeTypeGroup = 'group';
+const String canvasNodeTypeText = 'text';
+const String canvasNodeTypeEditing = 'editing';
+// 制作画布场次：每场一个，refType 为 screenplay_scene，x / y 是场次框内第一张卡片的左上角。
+// 场内片段由 production_clips.scene_id 决定并按成片顺序排在它下方，不用 parent_id 挂靠。
+const String canvasNodeTypeScene = 'scene';
 // 制作画布节点用 refType/refId 指向内容；不进构思画布的 [canvasNodeRefTypes]。
 const String canvasNodeRefTypeProductionClip = 'production_clip';
 const String canvasNodeRefTypeAsset = 'asset';
 const String canvasNodeRefTypeStaging = 'staging';
+const String canvasNodeRefTypeEditing = 'editing';
 const String canvasEdgeTypeInput = 'generation_input';
 // 导演台节点到它导出结果节点的连线，只由导出生成。
 const String canvasEdgeTypeStagingOutput = 'staging_output';
@@ -363,6 +370,8 @@ extension ProductionCanvasNodeRef on CanvasNode {
       refType == canvasNodeRefTypeProductionClip ? refId : null;
   String? get mediaAssetId => refType == canvasNodeRefTypeAsset ? refId : null;
   String? get stagingId => refType == canvasNodeRefTypeStaging ? refId : null;
+  String? get editingId => refType == canvasNodeRefTypeEditing ? refId : null;
+  String? get sceneId => type == canvasNodeTypeScene ? refId : null;
 }
 
 const List<String> canvasKinds = <String>[canvasKindUser];
@@ -2286,6 +2295,20 @@ class NovelContentDatabase extends _$NovelContentDatabase {
   static final Map<String, _CachedNovelContentDatabase> _databaseCache = {};
 
   final String filePath;
+
+  final Object _transactionContext = Object();
+
+  /// 需要在提交后更新内存状态的操作据此确保自己拥有最外层事务。
+  bool get isInTransaction => Zone.current[_transactionContext] == true;
+
+  @override
+  Future<T> transaction<T>(
+    Future<T> Function() action, {
+    bool requireNew = false,
+  }) => super.transaction(
+    () => runZoned(action, zoneValues: {_transactionContext: true}),
+    requireNew: requireNew,
+  );
 
   late final chapterDao = ChapterDao(this);
 
