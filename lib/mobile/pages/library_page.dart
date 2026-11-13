@@ -237,8 +237,6 @@ class MobileLibraryPage extends HookConsumerWidget {
                   required category,
                   required type,
                   required tags,
-                  required adaptationTitle,
-                  required plannedEpisodeCount,
                 }) {
                   return importService.importTxt(
                     filePath: filePath,
@@ -247,8 +245,6 @@ class MobileLibraryPage extends HookConsumerWidget {
                     category: category,
                     type: type,
                     tags: tags,
-                    adaptationTitle: adaptationTitle,
-                    plannedEpisodeCount: plannedEpisodeCount,
                   );
                 },
           ),
@@ -271,9 +267,7 @@ class MobileLibraryPage extends HookConsumerWidget {
         ),
       );
 
-      final novel = await actions.getNovel(
-        importResult.screenplayId ?? importResult.novelId,
-      );
+      final novel = await actions.getNovel(importResult.novelId);
       if (!context.mounted || novel == null) {
         return;
       }
@@ -468,7 +462,11 @@ class MobileLibraryPage extends HookConsumerWidget {
           ),
           data: (everything) {
             final allNovels = everything
-                .where((n) => n.contentKind == contentKind)
+                .where(
+                  (n) =>
+                      n.contentKind != contentKindCanvas &&
+                      n.contentKind == contentKind,
+                )
                 .toList();
             // 搜索时收起继续写和最近，结果直接顶到搜索框下面。
             final recent = allNovels.shelfVisible.sortedForShelf(
@@ -1075,6 +1073,7 @@ void _showNovelActionsSheet({
   final colors = RevericTheme.colorsOf(context);
   final typo = RevericTheme.typographyOf(context);
 
+  final isCanvas = novel.contentKind == contentKindCanvas;
   final isFinished = novel.status == contentStatusFinished;
   final isAbandoned = novel.status == contentStatusAbandoned;
   final isArchived = novel.status == contentStatusArchived;
@@ -1154,15 +1153,16 @@ void _showNovelActionsSheet({
                 ),
                 Divider(height: 1, color: colors.borderSubtle),
                 if (isActive) ...[
-                  _SheetItem(
-                    icon: RevericIcons.check_circle_outline,
-                    iconColor: colors.accent,
-                    label: sheetContext.t(LocaleKeys.libraryActionFinish),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      onUpdateStatus(contentStatusFinished);
-                    },
-                  ),
+                  if (!isCanvas)
+                    _SheetItem(
+                      icon: RevericIcons.check_circle_outline,
+                      iconColor: colors.accent,
+                      label: sheetContext.t(LocaleKeys.libraryActionFinish),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        onUpdateStatus(contentStatusFinished);
+                      },
+                    ),
                   _SheetItem(
                     icon: RevericIcons.archive_outlined,
                     iconColor: colors.accentAmber,
