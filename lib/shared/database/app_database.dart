@@ -139,7 +139,7 @@ class NovelCollections extends Table {
   TextColumn get filter =>
       text().nullable().map(const CollectionFilterConverter())();
 
-  /// 集合所属的作品类型；null 表示小说库和剧本库共用（只有默认集合）。
+  /// 集合所属的作品类型。null 只留给各库共用的内置「全部」。
   /// 取值由 Dart 侧 [validateContentKind] 校验。
   TextColumn get contentKind => text().nullable()();
   DateTimeColumn get createdAt =>
@@ -510,8 +510,14 @@ class ToolPermissionRules extends Table {
   Set<Column<Object>> get primaryKey => {id};
 }
 
-/// 本地素材在某个渠道私域素材库里的认证记录；同一素材在不同渠道各有一条。
+/// 本地素材在渠道中的上传或认证记录；同一素材按渠道和用途分别保存。
 class ProviderAssets extends Table {
+  TextColumn get kind => textEnum<ProviderAssetKind>().withDefault(
+    const Constant('certification'),
+  )();
+  TextColumn get contextHash => text().nullable()();
+  TextColumn get remoteUrl => text().nullable()();
+  DateTimeColumn get expiresAt => dateTime().nullable()();
   TextColumn get id => text()();
   TextColumn get assetId => text()();
   TextColumn get providerId => text()();
@@ -536,6 +542,8 @@ class ProviderAssets extends Table {
 }
 
 class GenerationTasks extends Table {
+  TextColumn get imageOutputs =>
+      text().map(const ImageTaskOutputsConverter()).nullable()();
   TextColumn get kind => textEnum<GenerationKind>()();
   TextColumn get id => text()();
 
@@ -1487,7 +1495,7 @@ class AppDatabase extends _$AppDatabase {
           await migrations.migrateToV5(migrator);
         } catch (error, stackTrace) {
           _log.error(
-            '[DB] CREATE remote_authorizations / indexes schema=5',
+            '[DB] ALTER provider_assets / CREATE remote_authorizations + indexes schema=5',
             error: error,
             stackTrace: stackTrace,
           );
@@ -1499,7 +1507,7 @@ class AppDatabase extends _$AppDatabase {
           await migrations.migrateToV6(migrator);
         } catch (error, stackTrace) {
           _log.error(
-            '[DB] CREATE remote_authorization_audit / indexes schema=6',
+            '[DB] ALTER generation_tasks ADD image_outputs / CREATE remote_authorization_audit + skill overrides + indexes schema=6',
             error: error,
             stackTrace: stackTrace,
           );
@@ -1668,6 +1676,10 @@ extension AssetMediaSummary on AssetRow {
 }
 
 extension GenerationTaskRequest on GenerationTask {
+  List<String> get resultAssetIds => imageOutputs == null
+      ? [?resultAssetId]
+      : [for (final item in imageOutputs!.items) ?item.assetId];
+
   AudioRequest get audioRequest =>
       (requestJson as AudioGenerationRequest).request;
   VideoRequest get videoRequest =>
