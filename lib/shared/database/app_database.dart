@@ -1445,7 +1445,7 @@ class AppDatabase extends _$AppDatabase {
 
   static _CachedAppDatabase? _cachedDatabase;
 
-  static const currentSchemaVersion = 6;
+  static const currentSchemaVersion = 7;
 
   @override
   int get schemaVersion => currentSchemaVersion;
@@ -1508,6 +1508,18 @@ class AppDatabase extends _$AppDatabase {
         } catch (error, stackTrace) {
           _log.error(
             '[DB] ALTER generation_tasks ADD image_outputs / CREATE remote_authorization_audit + skill overrides + indexes schema=6',
+            error: error,
+            stackTrace: stackTrace,
+          );
+          rethrow;
+        }
+      }
+      if (from < 7) {
+        try {
+          await migrations.migrateToV7(migrator);
+        } catch (error, stackTrace) {
+          _log.error(
+            '[DB] ALTER provider_assets ADD kind/context_hash/remote_url/expires_at schema=7 (v0.9.0 backfill)',
             error: error,
             stackTrace: stackTrace,
           );
