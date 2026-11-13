@@ -63,7 +63,12 @@ dependencies:
   collection: ^1.19.0
   easy_localization: ^3.0.8
   window_manager: ^0.5.1
-  tray_manager: ^0.8.3
+  # P0 崩溃根治（cnativeapi.dll 0xC0000005）：tray_manager 0.8.x 依赖
+  # nativeapi/nativeapi_flutter（运行时加载 cnativeapi.dll 即崩溃，且 nativeapi
+  # 0.5.10 的 Isolate.create 与 Flutter master 不兼容导致构建失败）。
+  # 0.5.3 是最后一个不依赖 nativeapi 的稳定版本（nativeapi 自 0.6.x 引入），
+  # 故固定 0.5.3，托盘改为旧式 API（TrayManager.instance / setIcon / Menu）。
+  tray_manager: 0.5.3
   flutter_local_notifications: ^22.3.0
   shared_preferences: ^2.5.3
   # 主密钥存放（P0-C 凭证迁移：DPAPI/Keychain/libsecret/Keystore）。

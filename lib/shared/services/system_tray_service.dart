@@ -11,6 +11,12 @@
 //   lib/shared/models/novel_type.dart
 //   lib/shared/database/app_database.dart
 //   lib/shared/database/novel_content_database.dart
+//
+// P0 崩溃根治：tray_manager 0.8.x 依赖 nativeapi（运行时加载 cnativeapi.dll
+// 即触发 0xC0000005 崩溃，且 nativeapi 0.5.10 的 Isolate.create 与 Flutter
+// master 不兼容导致构建失败）。此处改用 tray_manager 0.5.3 旧式 API
+// （TrayManager.instance / setIcon / setContextMenu / TrayListener），
+// 完全移除 nativeapi 运行时依赖。
 
 import 'dart:async';
 import 'dart:io';
@@ -56,13 +62,11 @@ class SystemTrayService {
   SystemTrayService._internal();
 
   @visibleForTesting
-  SystemTrayService.forTesting(this._trayIcon);
+  SystemTrayService.forTesting();
 
-  tray.TrayIcon? _trayIcon;
-  tray.Image? _icon;
+  // tray_manager 0.5.3：无 TrayIcon/Menu 句柄对象，仅持有监听器与菜单引用。
+  tray.TrayListener? _trayListener;
   tray.Menu? _menu;
-  tray.ListenerId? _trayListener;
-  final _menuItems = <(tray.MenuItem, tray.ListenerId)>[];
 
   GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
@@ -74,29 +78,17 @@ class SystemTrayService {
     }
 
     try {
-      final icon = tray.ImageAsset.fromAsset(_iconPath);
-      if (icon == null) {
-        throw StateError('Unable to load tray icon: $_iconPath');
-      }
-      _icon = icon;
-      final trayIcon = tray.TrayIcon.create();
-      if (trayIcon == null) {
-        throw StateError('Unable to create tray icon');
-      }
-      _trayIcon = trayIcon;
-      trayIcon
-        ..isIconTemplate = true
-        ..icon = icon
-        ..setTooltip('创作台');
-      _trayListener = trayIcon.addListener((event) async {
-        if (event is tray.TrayIconClickedEvent) {
-          await showMainWindow();
-        }
-      });
-      _updateMenu(trayIcon);
-      if (!trayIcon.setVisible(true)) {
-        throw StateError('Unable to show tray icon');
-      }
+      // 0.5.3 的 setIcon 在 Windows 下解析到
+      // <exe>/data/flutter_assets/<iconPath>（即 assets/logo/...，与打包一致）。
+      await tray.trayManager.setIcon(_iconPath, isTemplate: true);
+      await tray.trayManager.setToolTip('创作台');
+      final menu = _buildMenu();
+      _menu = menu;
+      await tray.trayManager.setContextMenu(menu);
+
+      final listener = _SystemTrayEventListener(this);
+      _trayListener = listener;
+      tray.trayManager.addListener(listener);
 
       await windowManager.setPreventClose(true);
       windowManager.addListener(_WindowCloseListener());
@@ -109,60 +101,47 @@ class SystemTrayService {
     }
   }
 
-  void _updateMenu(tray.TrayIcon trayIcon) {
-    final menu = tray.Menu.create();
-    if (menu == null) {
-      throw StateError('Unable to create tray menu');
-    }
-    _menu = menu;
-
-    void addItem(String label, Future<void> Function() action) {
-      final item = tray.MenuItem.createWithLabelAndType(
-        label,
-        tray.MenuItemType.normal,
-      );
-      if (item == null) {
-        throw StateError('Unable to create tray menu item: $label');
-      }
-      final listener = item.addListener((event) async {
-        if (event is tray.MenuItemClickedEvent) {
-          await action();
-        }
-      });
-      _menuItems.add((item, listener));
-      menu.addItem(item);
-    }
-
-    addItem('新建小说', _newNovel);
-    addItem('关于 Reveric', _about);
-    menu.addSeparator();
-    addItem('隐藏', _hideWindow);
-    addItem('显示', showMainWindow);
-    menu.addSeparator();
-    addItem('退出', _quit);
-    trayIcon
-      ..setContextMenu(menu)
-      ..setContextMenuTrigger(tray.ContextMenuTrigger.rightClicked);
+  tray.Menu _buildMenu() {
+    return tray.Menu(
+      items: [
+        tray.MenuItem(
+          label: '新建小说',
+          onClick: (_) => unawaited(_newNovel()),
+        ),
+        tray.MenuItem(
+          label: '关于 Reveric',
+          onClick: (_) => unawaited(_about()),
+        ),
+        tray.MenuItem.separator(),
+        tray.MenuItem(
+          label: '隐藏',
+          onClick: (_) => unawaited(_hideWindow()),
+        ),
+        tray.MenuItem(
+          label: '显示',
+          onClick: (_) => unawaited(showMainWindow()),
+        ),
+        tray.MenuItem.separator(),
+        tray.MenuItem(
+          label: '退出',
+          onClick: (_) => unawaited(_quit()),
+        ),
+      ],
+    );
   }
 
   void _disposeTray() {
-    final trayIcon = _trayIcon;
     final listener = _trayListener;
-    if (trayIcon != null && listener != null) {
-      trayIcon.removeListener(listener);
+    if (listener != null) {
+      tray.trayManager.removeListener(listener);
     }
     _trayListener = null;
-    for (final (item, listener) in _menuItems) {
-      item.removeListener(listener);
-      item.dispose();
-    }
-    _menuItems.clear();
-    trayIcon?.dispose();
-    _trayIcon = null;
-    _menu?.dispose();
     _menu = null;
-    _icon?.dispose();
-    _icon = null;
+    // 0.5.3 的 destroy() 走 MethodChannel（异步等待原生回包）。
+    // 进程退出时 OS 会回收托盘图标，无需阻塞退出流程；若原生回包
+    // 拖慢甚至停止宿主消息循环，await 会让 exit 卡住（0.8.x 亦为此
+    // 注释过"无需等待 channel 回包"）。故 fire-and-forget。
+    unawaited(tray.trayManager.destroy().catchError((Object _) {}));
   }
 
   /// 唤起主窗口：托盘点击、托盘菜单与第二实例激活请求共用。
@@ -411,7 +390,6 @@ class SystemTrayService {
       }
     }
 
-    // The native API releases its handles synchronously; no channel reply is needed.
     _log.info('[EXIT] destroying tray');
     try {
       _disposeTray();
@@ -442,6 +420,19 @@ class SystemTrayService {
       cleanExit: cleanExit,
       failureReporter: failureReporter,
     );
+  }
+}
+
+/// 0.5.3 的事件监听：左键单击托盘图标唤起主窗口。
+/// 菜单项动作由 [MenuItem.onClick] 直接绑定（无需 onTrayMenuItemClick）。
+class _SystemTrayEventListener with tray.TrayListener {
+  _SystemTrayEventListener(this._service);
+
+  final SystemTrayService _service;
+
+  @override
+  void onTrayIconMouseDown() {
+    unawaited(_service.showMainWindow());
   }
 }
 

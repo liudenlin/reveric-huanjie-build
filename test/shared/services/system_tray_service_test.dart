@@ -1,12 +1,14 @@
 // 职责: 系统托盘退出回归测试 — 确保关闭流程不被原生窗口回包阻塞。
 // 关联文件:
 //   lib/shared/services/system_tray_service.dart
+//
+// tray_manager 已固定 0.5.3（移除 nativeapi 崩溃根因）：托盘销毁走
+// MethodChannel('tray_manager') 的 destroy()，此处 mock 该通道验证行为。
 
 import 'dart:async';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:tray_manager/tray_manager.dart' as tray;
 import 'package:reveric/shared/services/system_tray_service.dart';
 import 'package:reveric/shared/logger/startup_failure_reporter.dart';
 
@@ -14,6 +16,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   const windowManagerChannel = MethodChannel('window_manager');
+  const trayChannel = MethodChannel('tray_manager');
   final calls = <String>[];
   Completer<Object?>? pendingWindowClose;
   var windowVisible = true;
@@ -36,11 +39,20 @@ void main() {
           }
           return true;
         });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(trayChannel, (call) async {
+          if (call.method == 'destroy') {
+            calls.add('tray.destroy');
+          }
+          return null;
+        });
   });
 
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(windowManagerChannel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(trayChannel, null);
   });
 
   test('exit guard cancels shutdown until its owner unregisters', () async {
@@ -65,24 +77,27 @@ void main() {
     expect(calls, isNot(contains('window.destroy')));
   });
 
-  test('exit disposes the native tray before closing the window', () async {
-    final service = SystemTrayService.forTesting(
-      _TrayIcon(() => calls.add('tray.dispose')),
-    );
+  test('exit requests native tray destroy and closes the window', () async {
+    final service = SystemTrayService.forTesting();
     await service.exitApplicationForTesting((code) => calls.add('exit.$code'));
-    expect(calls, [
-      'window.setPreventClose',
-      'tray.dispose',
-      'window.close',
-      'exit.0',
-    ]);
+    // destroy() 为 fire-and-forget（MethodChannel），让微任务完成后再断言。
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(calls, contains('tray.destroy'));
+    expect(calls, containsAllInOrder(['window.setPreventClose', 'exit.0']));
+    expect(calls, isNot(contains('window.destroy')));
   });
 
   test('native tray disposal failure does not prevent termination', () async {
-    final service = SystemTrayService.forTesting(
-      _TrayIcon(() => throw StateError('native disposal failed')),
-    );
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(trayChannel, (call) async {
+          if (call.method == 'destroy') {
+            throw StateError('native disposal failed');
+          }
+          return null;
+        });
+    final service = SystemTrayService.forTesting();
     await service.exitApplicationForTesting((code) => calls.add('exit.$code'));
+    await Future<void>.delayed(const Duration(milliseconds: 20));
     expect(calls, containsAllInOrder(['window.close', 'exit.0']));
   });
 
@@ -153,16 +168,4 @@ class _Reporter extends StartupFailureReporter {
   }) async {
     calls.add('report:$phase:$reason');
   }
-}
-
-class _TrayIcon implements tray.TrayIcon {
-  _TrayIcon(this.onDispose);
-
-  final void Function() onDispose;
-
-  @override
-  void dispose() => onDispose();
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
