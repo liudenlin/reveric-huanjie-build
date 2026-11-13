@@ -10,6 +10,7 @@
 //   assets/translations/zh-CN/settings.json
 // 遵循的 Rules:
 //   .agents/rules/state-management.md
+import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -30,12 +31,14 @@ import 'update_source.dart';
 final _log = AppLogger.forModule('UpdateService');
 const _updateChannel = MethodChannel('reveric/update');
 
+enum _DownloadOutcome { downloaded, cancelled, failed }
+
 /// 自动升级核心服务
 class UpdateService {
   final UpdateSource source;
-  final Dio _dio;
+  final FutureOr<Dio> Function() createClient;
 
-  UpdateService({required this.source}) : _dio = Dio();
+  UpdateService({required this.source, this.createClient = Dio.new});
 
   String? _currentVersion;
   UpdateInfo? _pendingUpdate;
@@ -95,17 +98,49 @@ class UpdateService {
     return result;
   }
 
-  /// 下载更新 (ZIP)
+  /// 下载更新。GitHub 资源下载失败时，改用同一文件在 R2 上的地址再试一次。
   Future<bool> downloadUpdate(UpdateInfo info) async {
+    final urls = <String>[info.downloadUrl];
+    final fallback = info.fallbackDownloadUrl;
+    if (fallback != null &&
+        fallback.isNotEmpty &&
+        fallback != info.downloadUrl) {
+      urls.add(fallback);
+    }
+    for (var index = 0; index < urls.length; index++) {
+      final outcome = await _downloadOnce(
+        info,
+        urls[index],
+        reportFailure: index == urls.length - 1,
+      );
+      if (outcome != _DownloadOutcome.failed) {
+        return outcome == _DownloadOutcome.downloaded;
+      }
+      if (index + 1 < urls.length) {
+        _log.warning(
+          'Download failed, trying mirror url=${urls[index + 1]} version=${info.version}',
+        );
+      }
+    }
+    return false;
+  }
+
+  Future<_DownloadOutcome> _downloadOnce(
+    UpdateInfo info,
+    String url, {
+    required bool reportFailure,
+  }) async {
+    Dio? client;
     try {
       _cancelToken?.cancel();
-      _cancelToken = CancelToken();
+      final cancelToken = CancelToken();
+      _cancelToken = cancelToken;
 
       _setProgress(const UpdateProgress.downloading(0));
       _pendingUpdate = info;
 
       final tempDir = await getTemporaryDirectory();
-      var ext = p.extension(Uri.parse(info.downloadUrl).path);
+      var ext = p.extension(Uri.parse(url).path);
       if (Platform.isAndroid) {
         ext = '.apk';
       }
@@ -113,13 +148,16 @@ class UpdateService {
         tempDir.path,
         'reveric_update_${info.version}$ext',
       );
+      await _deletePartialDownload(destPath);
 
       _log.info(
-        'downloadUpdate start url=${info.downloadUrl} destPath=$destPath version=${info.version}',
+        'downloadUpdate start url=$url destPath=$destPath version=${info.version}',
       );
 
-      await _dio.download(
-        info.downloadUrl,
+      // 每次下载独占客户端，读取最新代理配置并在结束时释放连接。
+      client = await createClient();
+      await client.download(
+        url,
         destPath,
         options: Options(
           responseType: ResponseType.stream,
@@ -130,7 +168,7 @@ class UpdateService {
             _setProgress(UpdateProgress.downloading(received / total));
           }
         },
-        cancelToken: _cancelToken,
+        cancelToken: cancelToken,
       );
 
       _log.info(
@@ -140,32 +178,48 @@ class UpdateService {
       _downloadedPath = destPath;
       _setProgress(const UpdateProgress.downloaded());
       _log.info('Update downloaded path=$destPath version=${info.version}');
-      return true;
+      return _DownloadOutcome.downloaded;
     } on DioException catch (e) {
       if (e.type == DioExceptionType.cancel) {
         _log.info('Download cancelled');
         _cleanupDownload();
-        return false;
+        return _DownloadOutcome.cancelled;
       }
       _log.warning(
-        'Download failed (Dio) error=$e type=${e.type.name} url=${_pendingUpdate?.downloadUrl} responseCode=${e.response?.statusCode}',
+        'Download failed (Dio) error=$e type=${e.type.name} url=$url responseCode=${e.response?.statusCode}',
       );
-      _setProgress(
-        const UpdateProgress.error(
-          LocaleKeys.settingsAboutUpdateDownloadFailed,
-        ),
-      );
-      return false;
+      if (reportFailure) {
+        _setProgress(
+          const UpdateProgress.error(
+            LocaleKeys.settingsAboutUpdateDownloadFailed,
+          ),
+        );
+      }
+      return _DownloadOutcome.failed;
     } catch (e) {
-      _log.warning(
-        'Download failed (generic) error=$e url=${_pendingUpdate?.downloadUrl}',
-      );
-      _setProgress(
-        const UpdateProgress.error(
-          LocaleKeys.settingsAboutUpdateDownloadFailed,
-        ),
-      );
-      return false;
+      _log.warning('Download failed (generic) error=$e url=$url');
+      if (reportFailure) {
+        _setProgress(
+          const UpdateProgress.error(
+            LocaleKeys.settingsAboutUpdateDownloadFailed,
+          ),
+        );
+      }
+      return _DownloadOutcome.failed;
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
+  Future<void> _deletePartialDownload(String path) async {
+    final file = File(path);
+    if (!file.existsSync()) {
+      return;
+    }
+    try {
+      await file.delete();
+    } catch (e) {
+      _log.warning('Failed to remove partial update error=$e path=$path');
     }
   }
 
