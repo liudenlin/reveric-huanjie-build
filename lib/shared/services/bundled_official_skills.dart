@@ -61,8 +61,8 @@ class BundledOfficialSkillSpec {
 ///
 /// `listingId` 等于 `name`。version / updatedAt 在规格表中维护。
 ///
-/// 版本维护遵循 AGENTS.md「打包官方技能按发布状态维护版本」：先核对实际发布
-/// 记录与标签代码；当前版本已发布才递增 version，未发布则合并修改并保留版本号。
+/// 版本维护遵循 `.agents/rules/agent-skills.md`「打包官方技能按发布状态维护版本」：
+/// 先核对实际发布记录与标签代码；当前版本已发布才递增 version，未发布则合并修改并保留版本号。
 /// 修改主文件或附件时都更新 contentHash 和 updatedAt。
 /// 自动升级依赖 version 递增；保留版本号时须用 SQLite skill 同步 Debug 数据库
 /// 中已有的官方安装快照与附件，并查询验证，不覆盖本地自定义内容。
@@ -169,11 +169,11 @@ const List<BundledOfficialSkillSpec> bundledOfficialSkillSpecs = [
       'assets/official_skills/screenplay-writing/references/review.md',
       'assets/official_skills/screenplay-writing/references/scene-writing.md',
     ],
-    version: 2,
+    version: 3,
     contentHash:
-        'fb31abf89118ea081ce5f10b99a5abe0d5205b093235bf81210bb66345f4f255',
+        '8860e7da186e009c9574e80637789cf522bd20613bfcd2bad0775f7de5178998',
     sortOrder: 10,
-    updatedAt: '2026-11-03T01:46:22+08:00',
+    updatedAt: '2026-11-12T01:32:00+08:00',
   ),
   BundledOfficialSkillSpec(
     name: '地图设计指南',
@@ -208,11 +208,11 @@ const List<BundledOfficialSkillSpec> bundledOfficialSkillSpecs = [
       'assets/official_skills/screenplay-production/references/video-prompts.md',
       'assets/official_skills/screenplay-production/references/wan-prompts.md',
     ],
-    version: 3,
+    version: 5,
     contentHash:
-        'f45cff5f7becd84b5367ecf8b6d0441ba57b57d99d18c900756e89b13c906c0c',
+        'afb6d7f8bb687c2a5128a663b63a2832698c0887ba77c1c6880e6b1fb408b865',
     sortOrder: 12,
-    updatedAt: '2026-11-05T18:04:41+08:00',
+    updatedAt: '2026-11-12T13:53:54+08:00',
   ),
 ];
 
