@@ -42,7 +42,6 @@
   "library.import_txt_empty": "这个 TXT 文件未识别到章节，无法导入。章节标题需单独成行，例如「第1章 标题」「第一回」「序章」「楔子」「番外」「Chapter 1」；分卷标题可写成「第一卷」。",
   "library.importing_txt": "正在导入…",
   "library.start_import": "开始导入",
-  "library.adapt_after_import": "导入后改编为剧本",
   "library.import_tags_hint": "用空格或逗号分隔标签",
   "library.custom_rules": "智能体规则",
   "library.select_cover": "选择封面",
@@ -52,6 +51,7 @@
   "library.no_matching_works": "没有匹配的作品",
   "library.clear_filters": "清除筛选",
   "library.status_in_progress": "创作中",
+  "library.status_active": "活跃中",
   "library.status_finished": "已完本",
   "library.status_abandoned": "已放弃",
   "library.status_archived": "已归档",
@@ -170,5 +170,10 @@
   "library.adapt_banner_hint": "选一本小说作为原著，书名、简介和标签会一并带入。",
   "library.adapt_no_source_novels": "书架上还没有小说",
   "library.novel_type_short_drama": "短剧",
-  "library.import_zip": "导入资料包 (ZIP)"
+  "library.import_zip": "导入资料包 (ZIP)",
+  "library.content_kind_canvas": "画布",
+  "library.create_canvas": "新建画布",
+  "library.default_canvas_title": "未命名画布",
+  "library.create_canvas_card_title": "新建画布",
+  "library.create_canvas_card_subtitle": "从剧本、提示词或素材开始"
 }
