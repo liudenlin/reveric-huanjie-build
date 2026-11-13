@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.9.1
+version: 0.9.2
 
 environment:
   sdk: ^3.12.0
@@ -150,18 +150,6 @@ dev_dependencies:
   native_toolchain_rust: ^1.0.7
 
 dependency_overrides:
-  # Separate the standalone runner's experimental isolate API from Flutter imports.
-  # https://github.com/libnativeapi/nativeapi/issues/22
-  nativeapi:
-    git:
-      url: https://github.com/libnativeapi/nativeapi.git
-      ref: 1c56c2b691e7535ccc959230a81cf4026b59a0c7
-      path: bindings/dart/nativeapi
-  nativeapi_flutter:
-    git:
-      url: https://github.com/libnativeapi/nativeapi.git
-      ref: 1c56c2b691e7535ccc959230a81cf4026b59a0c7
-      path: bindings/dart/nativeapi_flutter
   mcp_dart:
     path: third/mcp_dart
   irondash_engine_context:
