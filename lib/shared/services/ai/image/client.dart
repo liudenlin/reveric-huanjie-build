@@ -27,6 +27,8 @@ import '../../../models/ai_run_failure.dart';
 import '../../../utils/ai_error.dart';
 import '../../../logger/app_logger.dart';
 import '../../../models/ai_provider.dart';
+import '../../../models/network_proxy.dart';
+import '../../proxy_client.dart';
 import '../../../models/image/channels.dart';
 import '../image.dart';
 import '../image_reference_compression.dart';
@@ -50,6 +52,7 @@ class ImageGenerationRequest {
     this.resolution,
     this.images = const [],
     this.onSubmitted,
+    this.onOutputs,
   });
   final String prompt;
   final String model;
@@ -60,6 +63,7 @@ class ImageGenerationRequest {
   final String? resolution;
   final List<String> images;
   final ImageSubmitted? onSubmitted;
+  final ImageOutputsReceived? onOutputs;
 }
 
 /// 单个图片协议的请求编码与回执解析。渠道未登记的型号不做能力校验，
@@ -116,8 +120,16 @@ abstract class ImageClient {
   }
 
   @protected
-  Dio newImageDio() => Dio(
-    BaseOptions(
+  Dio newImageDio() => createProxyDioClient(
+    NetworkProxy(
+      mode: config.hasProxy
+          ? NetworkProxyMode.custom
+          : NetworkProxyMode.environment,
+      url: config.proxyUrl.trim(),
+      username: config.proxyUsername.trim(),
+      password: config.proxyPassword.trim(),
+    ),
+    options: BaseOptions(
       connectTimeout: imageHttpConnectTimeout,
       sendTimeout: imageHttpDataTimeout,
       receiveTimeout: imageHttpDataTimeout,
@@ -129,6 +141,7 @@ abstract class ImageClient {
     Uri uri,
     Map<String, dynamic> body, {
     Map<String, String>? headers,
+    Duration? timeout,
   }) async {
     final apiKey = requireApiKey();
     final client = config.createProxyClient() ?? http.Client();
@@ -147,7 +160,7 @@ abstract class ImageClient {
             },
             body: jsonEncode(body),
           )
-          .timeout(imageHttpDataTimeout);
+          .timeout(timeout ?? imageHttpDataTimeout);
       writeImageLog(
         '[IMGDBG] http_response status=${response.statusCode} uri=${safeImageUriForLog(uri)}',
       );
@@ -252,6 +265,29 @@ abstract class ImageClient {
     );
   }
 
+  /// 已取得的候选地址作为整组保留，任一下载失败也不能丢掉其余地址。
+  Future<AiImageGenerationResult> downloadResults(List<String> urls) async {
+    if (urls.isEmpty) {
+      throw invalidImageParameter();
+    }
+    final results = <AiImageGenerationResult>[];
+    try {
+      for (final url in urls) {
+        results.add(await downloadResult(url));
+      }
+      return AiImageGenerationResult.group(results);
+    } catch (error) {
+      for (final result in results) {
+        await result.disposeTemporary();
+      }
+      throw AiImageFetchException(
+        tr(LocaleKeys.aiImageCandidatesFetchFailed),
+        urls: urls,
+        debugMessage: 'Candidate download failed: $error',
+      );
+    }
+  }
+
   /// 按上游任务 ID 继续查询结果；只有异步任务协议支持。
   Future<AiImageGenerationResult> resumeResult(String providerTaskId) =>
       throw UnsupportedError('当前图片协议不支持按任务 ID 查询结果。');
@@ -309,44 +345,49 @@ abstract class ImageClient {
       'timeout_s=${imageHttpDataTimeout.inSeconds}',
     );
     final dio = newImageDio();
-    // 下载是幂等 GET，握手中断、连接重置这类瞬时网络错误就地重试。
-    Response<List<int>>? response;
-    for (var attempt = 1; response == null; attempt++) {
-      try {
-        response = await dio.get<List<int>>(
-          url,
-          options: Options(
-            responseType: ResponseType.bytes,
-            validateStatus: (_) => true,
-          ),
-          onReceiveProgress: receiveProgressLogger(uri, 'image_download'),
-        );
-      } on DioException catch (error) {
-        if (attempt >= _imageDownloadAttempts || !_isTransientDioError(error)) {
-          rethrow;
+    try {
+      // 下载是幂等 GET，握手中断、连接重置这类瞬时网络错误就地重试。
+      Response<List<int>>? response;
+      for (var attempt = 1; response == null; attempt++) {
+        try {
+          response = await dio.get<List<int>>(
+            url,
+            options: Options(
+              responseType: ResponseType.bytes,
+              validateStatus: (_) => true,
+            ),
+            onReceiveProgress: receiveProgressLogger(uri, 'image_download'),
+          );
+        } on DioException catch (error) {
+          if (attempt >= _imageDownloadAttempts ||
+              !_isTransientDioError(error)) {
+            rethrow;
+          }
+          writeImageLog(
+            '[IMGDBG] image_download_retry attempt=$attempt '
+            'uri=${safeImageUriForLog(uri)} error=${error.error ?? error.type}',
+          );
+          await Future<void>.delayed(Duration(seconds: attempt));
         }
-        writeImageLog(
-          '[IMGDBG] image_download_retry attempt=$attempt '
-          'uri=${safeImageUriForLog(uri)} error=${error.error ?? error.type}',
-        );
-        await Future<void>.delayed(Duration(seconds: attempt));
       }
-    }
-    final code = response.statusCode ?? -1;
-    final data = response.data;
-    writeImageLog(
-      '[IMGDBG] image_download_response status=$code '
-      'headers=${_responseHeadersSummary(response.headers)} '
-      'bytes=${data?.length ?? -1}',
-    );
-    if (code < 200 || code >= 300 || data == null || data.isEmpty) {
-      throw AiImageGenerationException(
-        '图片下载失败，请稍后重试。',
-        debugMessage: 'HTTP $code for ${safeImageUriForLog(uri)}',
+      final code = response.statusCode ?? -1;
+      final data = response.data;
+      writeImageLog(
+        '[IMGDBG] image_download_response status=$code '
+        'headers=${_responseHeadersSummary(response.headers)} '
+        'bytes=${data?.length ?? -1}',
       );
+      if (code < 200 || code >= 300 || data == null || data.isEmpty) {
+        throw AiImageGenerationException(
+          '图片下载失败，请稍后重试。',
+          debugMessage: 'HTTP $code for ${safeImageUriForLog(uri)}',
+        );
+      }
+      writeImageLog('[IMGDBG] image_download_done bytes=${data.length}');
+      return data;
+    } finally {
+      dio.close(force: true);
     }
-    writeImageLog('[IMGDBG] image_download_done bytes=${data.length}');
-    return data;
   }
 
   /// 归一化为 data URI：接受 data URI、URL、本地文件路径或裸 base64。
